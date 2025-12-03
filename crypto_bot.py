@@ -7,6 +7,55 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
+import os # Import for checking if the state file exists
+
+# --- PERSISTENCE FUNCTIONS (Simulating Database Operations) ---
+STATE_FILE = "bot_state.json"
+
+def load_state():
+    """
+    Loads the bot state from the JSON file if it exists.
+    In a production app, this would be replaced with a database call (e.g., Firestore).
+    """
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, 'r') as f:
+                # Load the data and ensure required keys exist for safety
+                loaded_data = json.load(f)
+                required_keys = ["balance", "shares", "avg_entry", "trades", "symbol", "symbol_name"]
+                if all(key in loaded_data for key in required_keys):
+                    return loaded_data
+                else:
+                    print("Corrupt state file detected. Starting fresh.")
+                    return None
+        except Exception as e:
+            # Handle JSON decode errors or file access issues
+            print(f"Error loading state: {e}. Starting fresh.")
+            return None
+    return None
+
+def save_state(data):
+    """
+    Saves the critical bot state to the JSON file.
+    In a production app, this would update the document in a database (e.g., Firestore).
+    """
+    try:
+        # Create a saveable copy, removing volatile time-series data (prices, times, sma)
+        # and non-serializable/volatile data points like 'current_price' and 'active' status.
+        saveable_data = {
+            "balance": data["balance"],
+            "shares": data["shares"],
+            "avg_entry": data["avg_entry"],
+            "trades": data["trades"],
+            "symbol": data["symbol"],
+            "symbol_name": data["symbol_name"]
+        }
+        
+        with open(STATE_FILE, 'w') as f:
+            json.dump(saveable_data, f, indent=4)
+    except Exception as e:
+        # Log error but don't crash the trading logic
+        print(f"Error saving state: {e}")
 
 # --- CONFIGURATION ---
 st.set_page_config(
@@ -18,19 +67,34 @@ st.set_page_config(
 # --- SESSION STATE INITIALIZATION ---
 # This keeps data alive between Streamlit re-runs
 if "data" not in st.session_state:
-    st.session_state.data = {
-        "prices": [],
-        "times": [],
-        "sma": [],
-        "balance": 10000.0,  # Starting Paper Money
-        "shares": 0.0,
-        "avg_entry": 0.0,
-        "trades": [],
-        "active": False,
-        "current_price": 0.0,
-        "symbol": "btcusdt",
-        "symbol_name": "Bitcoin"
-    }
+    loaded_data = load_state()
+    
+    if loaded_data:
+        # Load persisted data, but reset volatile metrics and active status
+        st.session_state.data = {
+            **loaded_data,
+            "prices": [],
+            "times": [],
+            "sma": [],
+            "current_price": 0.0, # Must be reset, will be updated by websocket
+            "active": False # Bot should start stopped after reload
+        }
+        st.toast("State loaded from previous session!", icon="💾")
+    else:
+        # Default starting state
+        st.session_state.data = {
+            "prices": [],
+            "times": [],
+            "sma": [],
+            "balance": 10000.0,  # Starting Paper Money
+            "shares": 0.0,
+            "avg_entry": 0.0,
+            "trades": [],
+            "active": False,
+            "current_price": 0.0,
+            "symbol": "btcusdt",
+            "symbol_name": "Bitcoin"
+        }
 
 # --- WEBSOCKET HANDLER (Background Thread) ---
 # This runs in the background to fetch live data from Binance
@@ -94,6 +158,8 @@ def run_websocket():
                             "time": now, "type": "BUY", "price": price, 
                             "amount": data["shares"], "pnl": 0
                         })
+                        # Save state after a trade execution
+                        save_state(data)
                 
                 # SELL CONDITION: Take Profit or Stop Loss
                 elif data["shares"] > 0:
@@ -114,6 +180,8 @@ def run_websocket():
                         # Reset holdings
                         data["shares"] = 0
                         data["avg_entry"] = 0
+                        # Save state after a trade execution
+                        save_state(data)
 
     def on_error(ws, error):
         # In a production environment, you would log this error properly
@@ -173,6 +241,25 @@ if st.sidebar.button("🔴 STOP BOT" if st.session_state.data["active"] else "�
         st.toast("Bot Activated! Listening for trade signals...", icon='🚀')
     else:
         st.toast("Bot Stopped. Position held (if any).", icon='🛑')
+        
+# --- Reset Button ---
+def reset_session():
+    """Resets all session state data and removes the persistence file."""
+    # This resets the balance and history to the starting state
+    st.session_state.data = {
+        "prices": [], "times": [], "sma": [], "balance": 10000.0,  
+        "shares": 0.0, "avg_entry": 0.0, "trades": [], "active": False,
+        "current_price": 0.0, "symbol": st.session_state.data["symbol"],
+        "symbol_name": st.session_state.data["symbol_name"]
+    }
+    # Delete the persistence file
+    if os.path.exists(STATE_FILE):
+        os.remove(STATE_FILE)
+    st.toast("Session and persistence file successfully reset!", icon="💥")
+
+st.sidebar.markdown("---")
+st.sidebar.button("💥 RESET BALANCE & HISTORY", on_click=reset_session, type="secondary")
+# --- End Reset Button ---
 
 
 # Display Status
@@ -244,7 +331,10 @@ with col1:
 with col2:
     st.metric("Total Equity", f"${current_equity:.2f}")
 with col3:
-    st.metric("Session Profit", f"${profit:.2f}", delta=f"{profit:.2f}", delta_color="normal")
+    # Use the initial starting balance of 10000 to calculate profit
+    initial_balance = 10000 
+    total_profit = current_equity - initial_balance
+    st.metric("Total Profit", f"${total_profit:.2f}", delta=f"{total_profit:.2f}", delta_color="normal")
 with col4:
     holdings = st.session_state.data["shares"]
     st.metric("Holdings", f"{holdings:.4f}")
