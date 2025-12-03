@@ -428,4 +428,5 @@ with colC:
 nowt = time.time()
 if nowt - st.session_state.last_refresh > 1.0:
     st.session_state.last_refresh = nowt
-    st.experimental_rerun()
+    st.rerun()
+
