@@ -35,11 +35,18 @@ if "data" not in st.session_state:
 # --- WEBSOCKET HANDLER (Background Thread) ---
 # This runs in the background to fetch live data from Binance
 def run_websocket():
+    # Inner function to handle messages received from the socket
     def on_message(ws, message):
-        json_message = json.loads(message)
-        price = float(json_message['p'])
-        
-        # Update Session State safely
+        try:
+            json_message = json.loads(message)
+            # We are interested in the 'p' (price) field from a trade stream
+            price = float(json_message['p'])
+        except (json.JSONDecodeError, ValueError, KeyError):
+            # Handle malformed or unexpected messages
+            print("Received malformed or incomplete data.")
+            return
+
+        # Update Session State safely (This is read-only in the thread, Streamlit handles the write protection)
         if "data" in st.session_state:
             now = datetime.now().strftime("%H:%M:%S")
             data = st.session_state.data
@@ -49,63 +56,82 @@ def run_websocket():
             data["prices"].append(price)
             data["times"].append(now)
             
-            # Keep only last 100 data points
-            if len(data["prices"]) > 100:
+            # Keep only last 100 data points to prevent memory overflow
+            MAX_POINTS = 100
+            if len(data["prices"]) > MAX_POINTS:
                 data["prices"].pop(0)
                 data["times"].pop(0)
                 if len(data["sma"]) > 0: data["sma"].pop(0)
 
             # 2. Calculate SMA (Simple Moving Average - 20 periods)
-            if len(data["prices"]) >= 20:
-                sma_val = np.mean(data["prices"][-20:])
+            SMA_PERIOD = 20
+            if len(data["prices"]) >= SMA_PERIOD:
+                sma_val = np.mean(data["prices"][-SMA_PERIOD:])
                 data["sma"].append(sma_val)
             else:
-                data["sma"].append(None)
+                data["sma"].append(None) # Append None if not enough data points
 
             # 3. TRADING LOGIC (If Active)
             if data["active"] and data["sma"][-1] is not None:
                 current_sma = data["sma"][-1]
                 
-                # BUY CONDITION: Price is 0.05% below SMA (Buy the dip)
+                # BUY CONDITION: Price is 0.05% below SMA (Buy the dip - Mean Reversion)
                 if data["shares"] == 0 and price < current_sma * 0.9995:
-                    invest_amount = data["balance"] * 0.9
-                    data["shares"] = invest_amount / price
-                    data["balance"] -= invest_amount
-                    data["avg_entry"] = price
-                    data["trades"].insert(0, {
-                        "time": now, "type": "BUY", "price": price, 
-                        "amount": data["shares"], "pnl": 0
-                    })
+                    invest_amount = data["balance"] * 0.9 # Invest 90% of available balance
+                    if invest_amount > 0:
+                        data["shares"] = invest_amount / price
+                        data["balance"] -= invest_amount
+                        data["avg_entry"] = price
+                        # Log the trade
+                        data["trades"].insert(0, {
+                            "time": now, "type": "BUY", "price": price, 
+                            "amount": data["shares"], "pnl": 0
+                        })
                 
                 # SELL CONDITION: Take Profit (0.1%) or Stop Loss (-0.2%)
                 elif data["shares"] > 0:
                     profit_pct = (price - data["avg_entry"]) / data["avg_entry"]
                     
+                    # Check for Take Profit or Stop Loss
                     if profit_pct > 0.001 or profit_pct < -0.002:
                         revenue = data["shares"] * price
                         pnl = revenue - (data["shares"] * data["avg_entry"])
                         data["balance"] += revenue
                         
+                        # Log the trade
                         data["trades"].insert(0, {
                             "time": now, "type": "SELL", "price": price, 
                             "amount": data["shares"], "pnl": pnl
                         })
+                        
+                        # Reset holdings
                         data["shares"] = 0
                         data["avg_entry"] = 0
 
     def on_error(ws, error):
-        print(f"Error: {error}")
+        # In a production environment, you would log this error properly
+        print(f"WebSocket Error: {error}")
+
+    def on_close(ws, close_status_code, close_msg):
+        print(f"WebSocket closed: {close_status_code} - {close_msg}")
 
     # Connect to Binance Stream
-    # Note: Streamlit re-runs script often, but threads persist in background
     symbol = st.session_state.data['symbol']
+    # Binance trade stream endpoint for live price updates
     socket = f"wss://stream.binance.com:9443/ws/{symbol}@trade"
     
-    ws = websocket.WebSocketApp(socket, on_message=on_message, on_error=on_error)
+    ws = websocket.WebSocketApp(
+        socket, 
+        on_message=on_message, 
+        on_error=on_error,
+        on_close=on_close
+    )
+    # run_forever blocks the thread until manually stopped or connection fails
     ws.run_forever()
 
 # Start WebSocket in a separate thread if not already running
-if "ws_thread" not in st.session_state:
+# The 'daemon=True' ensures the thread closes when the main app closes
+if "ws_thread" not in st.session_state or not st.session_state.ws_thread.is_alive():
     ws_thread = threading.Thread(target=run_websocket, daemon=True)
     ws_thread.start()
     st.session_state.ws_thread = ws_thread
@@ -126,15 +152,23 @@ if selected_coin[0] != st.session_state.data["symbol"]:
     st.session_state.data["symbol_name"] = selected_coin[1]
     st.session_state.data["prices"] = [] # Reset history
     st.session_state.data["sma"] = []
-    # Note: To fully switch streams, one would need to restart the thread/socket.
-    # For this simple demo, please restart the app to switch data streams effectively.
-    st.warning("Please restart the app to fetch data for the new symbol.")
-    st.rerun()
+    
+    # Due to the complexity of closing and restarting the WebSocket thread, 
+    # we instruct the user to restart the app for the change to take full effect.
+    st.warning("Symbol changed. **Please manually restart the Streamlit application** to connect the WebSocket to the new stream.")
+    # Optional: Stop the bot automatically upon symbol change
+    st.session_state.data["active"] = False 
 
 # Bot Toggle
 if st.sidebar.button("🔴 STOP BOT" if st.session_state.data["active"] else "🟢 START BOT"):
     st.session_state.data["active"] = not st.session_state.data["active"]
+    if st.session_state.data["active"]:
+        st.toast("Bot Activated! Listening for trade signals...", icon='🚀')
+    else:
+        st.toast("Bot Stopped. Position held (if any).", icon='🛑')
 
+
+# Display Status
 status_color = "green" if st.session_state.data["active"] else "red"
 status_text = "RUNNING" if st.session_state.data['active'] else "STOPPED"
 st.sidebar.markdown(f"Status: **:{status_color}[{status_text}]**")
@@ -143,25 +177,28 @@ st.sidebar.markdown(f"Status: **:{status_color}[{status_text}]**")
 st.sidebar.markdown("---")
 st.sidebar.subheader("Strategy Logic")
 st.sidebar.info("""
-**Mean Reversion:**
-- **Buy:** Price drops 0.05% below SMA
-- **Sell:** Profit > 0.1% OR Loss > 0.2%
+**Mean Reversion (20-period SMA):**
+- **Buy:** Price drops 0.05% below the Simple Moving Average.
+- **Sell (Take Profit):** Profit reaches > 0.1%.
+- **Sell (Stop Loss):** Loss reaches > 0.2%.
 """)
 
 # 2. Main Dashboard
 st.title(f"Live {st.session_state.data['symbol_name']} Trader")
 
-# Metrics Row
-col1, col2, col3, col4 = st.columns(4)
+# Calculate current financial metrics
 current_equity = st.session_state.data["balance"] + (st.session_state.data["shares"] * st.session_state.data["current_price"])
 profit = current_equity - 10000
+
+# Metrics Row
+col1, col2, col3, col4 = st.columns(4)
 
 with col1:
     st.metric("Live Price", f"${st.session_state.data['current_price']:.2f}")
 with col2:
     st.metric("Total Equity", f"${current_equity:.2f}")
 with col3:
-    st.metric("Session Profit", f"${profit:.2f}", delta_color="normal")
+    st.metric("Session Profit", f"${profit:.2f}", delta=f"{profit:.2f}", delta_color="normal")
 with col4:
     holdings = st.session_state.data["shares"]
     st.metric("Holdings", f"{holdings:.4f}")
@@ -181,14 +218,17 @@ if len(st.session_state.data["prices"]) > 0:
 
     # SMA Line
     if len(st.session_state.data["sma"]) > 0:
-         # Filter out None values for plotting
-        valid_sma = [x for x in st.session_state.data["sma"] if x is not None]
-        # Align times
-        sma_times = st.session_state.data["times"][-len(valid_sma):]
+        # Filter out None values and align times
+        valid_sma_data = [(st.session_state.data["times"][i], st.session_state.data["sma"][i]) 
+                          for i in range(len(st.session_state.data["sma"])) 
+                          if st.session_state.data["sma"][i] is not None]
+        
+        sma_times = [t[0] for t in valid_sma_data]
+        sma_values = [t[1] for t in valid_sma_data]
         
         fig.add_trace(go.Scatter(
             x=sma_times,
-            y=valid_sma,
+            y=sma_values,
             mode='lines',
             name='SMA (20)',
             line=dict(color='#ffd700', dash='dash')
@@ -196,26 +236,32 @@ if len(st.session_state.data["prices"]) > 0:
 
     fig.update_layout(
         height=400,
-        margin=dict(l=0, r=0, t=0, b=0),
+        margin=dict(l=20, r=20, t=20, b=20),
+        # Ensure plot colors are suitable for dark mode (Streamlit default)
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
         xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=True, gridcolor='#333'),
-        font=dict(color='white')
+        font=dict(color='white'),
+        hovermode="x unified"
     )
     st.plotly_chart(fig, use_container_width=True)
 
 else:
-    st.warning("Waiting for market data... (If this takes too long, check internet connection)")
+    st.warning("Waiting for live market data stream... (This may take a moment to collect 20 data points for the SMA)")
 
 # 4. Trade Log
 st.subheader("Transaction History")
 if len(st.session_state.data["trades"]) > 0:
     df = pd.DataFrame(st.session_state.data["trades"])
-    st.dataframe(df, use_container_width=True)
-else:
-    st.text("No trades executed yet.")
+    # Format P&L for better readability
+    df['pnl'] = df['pnl'].apply(lambda x: f"${x:.2f}")
+    df['price'] = df['price'].apply(lambda x: f"${x:.2f}")
 
-# Auto-refresh mechanism (Streamlit needs this to update the UI)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+else:
+    st.text("No trades executed yet. Press '🟢 START BOT' to begin paper trading.")
+
+# Auto-refresh mechanism (Streamlit needs this to update the UI based on the background thread)
 time.sleep(1) 
 st.rerun()
