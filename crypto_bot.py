@@ -1,407 +1,431 @@
+# app.py
 import streamlit as st
-import websocket
-import json
 import threading
+import queue
+import requests
+import json
+import os
 import time
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
 from datetime import datetime
-import os # Import for checking if the state file exists
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
 
-# --- PERSISTENCE FUNCTIONS (Simulating Database Operations) ---
+# Optional: websocket-client package
+# pip install websocket-client
+import websocket
+
+# -------------------------
+# Configuration / Constants
+# -------------------------
 STATE_FILE = "bot_state.json"
+DEFAULT_SYMBOL = "BTCUSDT"
+BINANCE_REST_TRADES = "https://api.binance.com/api/v3/trades"  # recent trades endpoint
+BINANCE_WS_TEMPLATE = "wss://stream.binance.com:9443/ws/{}@trade"
+MAX_POINTS = 500  # maximum points to keep in memory
 
+# -------------------------
+# Persistence helpers
+# -------------------------
 def load_state():
-    """
-    Loads the bot state from the JSON file if it exists.
-    In a production app, this would be replaced with a database call (e.g., Firestore).
-    """
     if os.path.exists(STATE_FILE):
         try:
-            with open(STATE_FILE, 'r') as f:
-                # Load the data and ensure required keys exist for safety
-                loaded_data = json.load(f)
-                required_keys = ["balance", "shares", "avg_entry", "trades", "symbol", "symbol_name"]
-                if all(key in loaded_data for key in required_keys):
-                    return loaded_data
+            with open(STATE_FILE, "r") as f:
+                data = json.load(f)
+                # Ensure minimum required keys exist
+                required = {"balance", "shares", "avg_entry", "trades", "symbol", "symbol_name"}
+                if required.issubset(set(data.keys())):
+                    return data
                 else:
-                    print("Corrupt state file detected. Starting fresh.")
+                    print("State file missing keys, ignoring.")
                     return None
         except Exception as e:
-            # Handle JSON decode errors or file access issues
-            print(f"Error loading state: {e}. Starting fresh.")
+            print("Error loading state file:", e)
             return None
     return None
 
 def save_state(data):
-    """
-    Saves the critical bot state to the JSON file.
-    In a production app, this would update the document in a database (e.g., Firestore).
-    """
     try:
-        # Create a saveable copy, removing volatile time-series data (prices, times, sma)
-        # and non-serializable/volatile data points like 'current_price' and 'active' status.
-        saveable_data = {
-            "balance": data["balance"],
-            "shares": data["shares"],
-            "avg_entry": data["avg_entry"],
-            "trades": data["trades"],
-            "symbol": data["symbol"],
-            "symbol_name": data["symbol_name"]
+        saveable = {
+            "balance": data.get("balance", 10000.0),
+            "shares": data.get("shares", 0.0),
+            "avg_entry": data.get("avg_entry", 0.0),
+            "trades": data.get("trades", []),
+            "symbol": data.get("symbol", DEFAULT_SYMBOL),
+            "symbol_name": data.get("symbol_name", "Bitcoin")
         }
-        
-        with open(STATE_FILE, 'w') as f:
-            json.dump(saveable_data, f, indent=4)
+        with open(STATE_FILE, "w") as f:
+            json.dump(saveable, f, indent=2)
     except Exception as e:
-        # Log error but don't crash the trading logic
-        print(f"Error saving state: {e}")
+        print("Error saving state:", e)
 
-# --- CONFIGURATION ---
-st.set_page_config(
-    page_title="Python AlgoTrader",
-    layout="wide",
-    page_icon="📈"
-)
+# -------------------------
+# Session init
+# -------------------------
+st.set_page_config(page_title="Hybrid Live Trader (REST + WS)", layout="wide", page_icon="📈")
 
-# --- SESSION STATE INITIALIZATION ---
-# This keeps data alive between Streamlit re-runs
 if "data" not in st.session_state:
-    loaded_data = load_state()
-    
-    if loaded_data:
-        # Load persisted data, but reset volatile metrics and active status
+    loaded = load_state()
+    if loaded:
         st.session_state.data = {
-            **loaded_data,
+            **loaded,
             "prices": [],
             "times": [],
             "sma": [],
-            "current_price": 0.0, # Must be reset, will be updated by websocket
-            "active": False # Bot should start stopped after reload
+            "current_price": 0.0,
+            "active": False,
+            "symbol_name": loaded.get("symbol_name", "Asset"),
         }
-        st.toast("State loaded from previous session!", icon="💾")
+        st.toast("Loaded persisted state", icon="💾")
     else:
-        # Default starting state
         st.session_state.data = {
             "prices": [],
             "times": [],
             "sma": [],
-            "balance": 10000.0,  # Starting Paper Money
+            "balance": 10000.0,
             "shares": 0.0,
             "avg_entry": 0.0,
             "trades": [],
             "active": False,
             "current_price": 0.0,
-            "symbol": "btcusdt",
+            "symbol": DEFAULT_SYMBOL.lower(),
             "symbol_name": "Bitcoin"
         }
 
-# --- WEBSOCKET HANDLER (Background Thread) ---
-# This runs in the background to fetch live data from Binance
-def run_websocket():
-    # Inner function to handle messages received from the socket
-    def on_message(ws, message):
-        try:
-            json_message = json.loads(message)
-            # We are interested in the 'p' (price) field from a trade stream
-            price = float(json_message['p'])
-        except (json.JSONDecodeError, ValueError, KeyError):
-            # Handle malformed or unexpected messages
-            print("Received malformed or incomplete data.")
+# queue for passing (timestamp, price) tuples from WS thread -> main thread
+if "ws_queue" not in st.session_state:
+    st.session_state.ws_queue = queue.Queue()
+
+# ws control items
+if "ws_thread" not in st.session_state:
+    st.session_state.ws_thread = None
+if "ws_stop_event" not in st.session_state:
+    st.session_state.ws_stop_event = None
+if "last_refresh" not in st.session_state:
+    st.session_state.last_refresh = time.time()
+
+# -------------------------
+# Binance helpers
+# -------------------------
+def fetch_recent_trades(symbol: str, limit: int = 200):
+    """Fetch recent trades via Binance REST (public). Returns list of (timestamp_str, price)."""
+    params = {"symbol": symbol.upper(), "limit": limit}
+    try:
+        r = requests.get(BINANCE_REST_TRADES, params=params, timeout=6)
+        r.raise_for_status()
+        trades = r.json()
+        results = []
+        for t in trades:
+            # 'price' is string, 'time' is ms timestamp
+            price = float(t.get("price", 0.0))
+            ts = datetime.fromtimestamp(t.get("time", 0) / 1000.0).strftime("%H:%M:%S")
+            results.append((ts, price))
+        return results
+    except Exception as e:
+        print("REST fetch error:", e)
+        return []
+
+# -------------------------
+# WebSocket thread (producer)
+# -------------------------
+def websocket_thread_fn(queue_obj: queue.Queue, stop_event: threading.Event, symbol: str):
+    """
+    Connects to Binance trade stream and pushes (timestamp, price) tuples into queue_obj.
+    The thread exits when stop_event is set.
+    """
+    ws_url = BINANCE_WS_TEMPLATE.format(symbol.lower())
+    print(f"[ws] starting thread for {symbol} -> {ws_url}")
+
+    def _on_open(ws):
+        print("[ws] connection opened for", symbol)
+
+    def _on_message(ws, message):
+        if stop_event.is_set():
+            try:
+                ws.close()
+            except Exception:
+                pass
             return
+        try:
+            msg = json.loads(message)
+            price = float(msg.get("p", 0.0))
+            ts = datetime.now().strftime("%H:%M:%S")
+            queue_obj.put((ts, price))
+        except Exception as e:
+            print("[ws] parse error:", e)
 
-        # Update Session State safely (This is read-only in the thread, Streamlit handles the write protection)
-        if "data" in st.session_state:
-            now = datetime.now().strftime("%H:%M:%S")
-            data = st.session_state.data
-            
-            # Retrieve parameters set by the user in the UI
-            SMA_PERIOD = st.session_state.get("sma_period", 20)
-            BUY_DIP_PCT = st.session_state.get("buy_dip_pct", 0.0005) # Default 0.05%
-            TAKE_PROFIT_PCT = st.session_state.get("take_profit_pct", 0.001) # Default 0.1%
-            STOP_LOSS_PCT = st.session_state.get("stop_loss_pct", 0.002) # Default 0.2%
-            INVEST_PERCENT = st.session_state.get("invest_percent", 0.9) # Default 90%
-            
-            # 1. Update Price Data
-            data["current_price"] = price
-            data["prices"].append(price)
-            data["times"].append(now)
-            
-            # Keep only last 100 data points to prevent memory overflow
-            MAX_POINTS = 100
-            if len(data["prices"]) > MAX_POINTS:
-                data["prices"].pop(0)
-                data["times"].pop(0)
-                if len(data["sma"]) > 0: data["sma"].pop(0)
+    def _on_error(ws, err):
+        print("[ws] error:", err)
 
-            # 2. Calculate SMA (Simple Moving Average - based on user input)
-            if len(data["prices"]) >= SMA_PERIOD:
-                sma_val = np.mean(data["prices"][-SMA_PERIOD:])
-                data["sma"].append(sma_val)
-            else:
-                data["sma"].append(None) # Append None if not enough data points
+    def _on_close(ws, code, reason):
+        print(f"[ws] closed: {code} / {reason}")
 
-            # 3. TRADING LOGIC (If Active)
-            if data["active"] and data["sma"][-1] is not None:
-                current_sma = data["sma"][-1]
-                
-                # BUY CONDITION: Price is below the SMA by the user-defined percentage
-                # The logic is: price < current_sma * (1 - BUY_DIP_PCT)
-                if data["shares"] == 0 and price < current_sma * (1 - BUY_DIP_PCT):
-                    invest_amount = data["balance"] * INVEST_PERCENT
-                    if invest_amount > 0:
-                        data["shares"] = invest_amount / price
-                        data["balance"] -= invest_amount
-                        data["avg_entry"] = price
-                        # Log the trade
-                        data["trades"].insert(0, {
-                            "time": now, "type": "BUY", "price": price, 
-                            "amount": data["shares"], "pnl": 0
-                        })
-                        # Save state after a trade execution
-                        save_state(data)
-                
-                # SELL CONDITION: Take Profit or Stop Loss
-                elif data["shares"] > 0:
-                    profit_pct = (price - data["avg_entry"]) / data["avg_entry"]
-                    
-                    # Check for Take Profit (profit_pct > TAKE_PROFIT_PCT) or Stop Loss (profit_pct < -STOP_LOSS_PCT)
-                    if profit_pct > TAKE_PROFIT_PCT or profit_pct < -STOP_LOSS_PCT:
-                        revenue = data["shares"] * price
-                        pnl = revenue - (data["shares"] * data["avg_entry"])
-                        data["balance"] += revenue
-                        
-                        # Log the trade
-                        data["trades"].insert(0, {
-                            "time": now, "type": "SELL", "price": price, 
-                            "amount": data["shares"], "pnl": pnl
-                        })
-                        
-                        # Reset holdings
-                        data["shares"] = 0
-                        data["avg_entry"] = 0
-                        # Save state after a trade execution
-                        save_state(data)
+    ws = websocket.WebSocketApp(ws_url, on_open=_on_open, on_message=_on_message, on_error=_on_error, on_close=_on_close)
+    # run_forever will block; we wrap in try/except
+    try:
+        # run_forever supports ping to keep connection alive
+        ws.run_forever(ping_interval=20, ping_timeout=10)
+    except Exception as e:
+        print("[ws] run_forever exception:", e)
+    print("[ws] exiting thread for", symbol)
 
-    def on_error(ws, error):
-        # In a production environment, you would log this error properly
-        print(f"WebSocket Error: {error}")
+def start_ws(symbol: str):
+    """Start WS thread for the given symbol, handling prior thread shutdown if needed."""
+    # stop previous if alive
+    if st.session_state.get("ws_stop_event"):
+        st.session_state.ws_stop_event.set()
+        st.session_state.ws_stop_event = None
+        st.session_state.ws_thread = None
+        # queue may hold old messages; flush it
+        while not st.session_state.ws_queue.empty():
+            try:
+                st.session_state.ws_queue.get_nowait()
+            except Exception:
+                break
 
-    def on_close(ws, close_status_code, close_msg):
-        print(f"WebSocket closed: {close_status_code} - {close_msg}")
+    stop_event = threading.Event()
+    st.session_state.ws_stop_event = stop_event
+    t = threading.Thread(target=websocket_thread_fn, args=(st.session_state.ws_queue, stop_event, symbol), daemon=True)
+    t.start()
+    st.session_state.ws_thread = t
+    print("[main] started ws thread for", symbol)
 
-    # Connect to Binance Stream
-    symbol = st.session_state.data['symbol']
-    # Binance trade stream endpoint for live price updates
-    socket = f"wss://stream.binance.com:9443/ws/{symbol}@trade"
-    
-    ws = websocket.WebSocketApp(
-        socket, 
-        on_message=on_message, 
-        on_error=on_error,
-        on_close=on_close
-    )
-    # run_forever blocks the thread until manually stopped or connection fails
-    ws.run_forever()
+def stop_ws():
+    if st.session_state.get("ws_stop_event"):
+        st.session_state.ws_stop_event.set()
+        print("[main] signaled ws stop")
+    st.session_state.ws_thread = None
 
-# Start WebSocket in a separate thread if not already running
-# The 'daemon=True' ensures the thread closes when the main app closes
-if "ws_thread" not in st.session_state or not st.session_state.ws_thread.is_alive():
-    ws_thread = threading.Thread(target=run_websocket, daemon=True)
-    ws_thread.start()
-    st.session_state.ws_thread = ws_thread
-
-# --- UI LAYOUT ---
-
-# 1. Sidebar Controls
+# -------------------------
+# UI: Sidebar controls
+# -------------------------
 st.sidebar.title("🤖 Control Panel")
-selected_coin = st.sidebar.selectbox(
-    "Select Asset", 
-    [("btcusdt", "Bitcoin"), ("ethusdt", "Ethereum"), ("solusdt", "Solana"), ("dogeusdt", "Dogecoin")],
-    format_func=lambda x: x[1]
-)
 
-# Handle Coin Change
-if selected_coin[0] != st.session_state.data["symbol"]:
-    st.session_state.data["symbol"] = selected_coin[0]
-    st.session_state.data["symbol_name"] = selected_coin[1]
-    st.session_state.data["prices"] = [] # Reset history
+symbol_map = [
+    ("BTCUSDT", "Bitcoin"),
+    ("ETHUSDT", "Ethereum"),
+    ("SOLUSDT", "Solana"),
+    ("DOGEUSDT", "Dogecoin"),
+]
+
+selected = st.sidebar.selectbox("Select Asset", symbol_map, format_func=lambda x: x[1], index=0)
+selected_symbol, selected_name = selected
+
+# handle symbol change
+if selected_symbol.lower() != st.session_state.data.get("symbol", DEFAULT_SYMBOL).lower():
+    # update session symbol but keep running/stopped behavior
+    st.session_state.data["symbol"] = selected_symbol.lower()
+    st.session_state.data["symbol_name"] = selected_name
+    st.session_state.data["prices"] = []
+    st.session_state.data["times"] = []
     st.session_state.data["sma"] = []
-    
-    # Due to the complexity of closing and restarting the WebSocket thread, 
-    # we instruct the user to restart the app for the change to take full effect.
-    st.warning("Symbol changed. **Please manually restart the Streamlit application** to connect the WebSocket to the new stream.")
-    # Optional: Stop the bot automatically upon symbol change
-    st.session_state.data["active"] = False 
+    st.sidebar.warning("Symbol changed. Reconnecting to new stream...")
+    # restart websocket automatically
+    start_ws(selected_symbol)
 
-# Bot Toggle
-if st.sidebar.button("🔴 STOP BOT" if st.session_state.data["active"] else "🟢 START BOT"):
+# bot on/off
+if st.sidebar.button("🟢 START BOT" if not st.session_state.data["active"] else "🔴 STOP BOT"):
     st.session_state.data["active"] = not st.session_state.data["active"]
     if st.session_state.data["active"]:
-        st.toast("Bot Activated! Listening for trade signals...", icon='🚀')
+        st.toast("Bot Activated! Listening for trade signals...", icon="🚀")
     else:
-        st.toast("Bot Stopped. Position held (if any).", icon='🛑')
-        
-# --- Reset Button ---
+        st.toast("Bot Stopped. Holding position if any.", icon="🛑")
+
+# Reset session
 def reset_session():
-    """Resets all session state data and removes the persistence file."""
-    # This resets the balance and history to the starting state
     st.session_state.data = {
-        "prices": [], "times": [], "sma": [], "balance": 10000.0,  
-        "shares": 0.0, "avg_entry": 0.0, "trades": [], "active": False,
-        "current_price": 0.0, "symbol": st.session_state.data["symbol"],
-        "symbol_name": st.session_state.data["symbol_name"]
+        "prices": [], "times": [], "sma": [],
+        "balance": 10000.0, "shares": 0.0, "avg_entry": 0.0,
+        "trades": [], "active": False, "current_price": 0.0,
+        "symbol": st.session_state.data.get("symbol", DEFAULT_SYMBOL),
+        "symbol_name": st.session_state.data.get("symbol_name", "Asset")
     }
-    # Delete the persistence file
     if os.path.exists(STATE_FILE):
-        os.remove(STATE_FILE)
-    st.toast("Session and persistence file successfully reset!", icon="💥")
+        try:
+            os.remove(STATE_FILE)
+        except Exception as e:
+            print("Error deleting state file:", e)
+    # flush queue
+    while not st.session_state.ws_queue.empty():
+        try:
+            st.session_state.ws_queue.get_nowait()
+        except Exception:
+            break
+    st.toast("Session reset and persistence removed.", icon="💥")
 
 st.sidebar.markdown("---")
-st.sidebar.button("💥 RESET BALANCE & HISTORY", on_click=reset_session, type="secondary")
-# --- End Reset Button ---
+st.sidebar.button("💥 RESET BALANCE & HISTORY", on_click=reset_session)
 
-
-# Display Status
-status_color = "green" if st.session_state.data["active"] else "red"
-status_text = "RUNNING" if st.session_state.data['active'] else "STOPPED"
-st.sidebar.markdown(f"Status: **:{status_color}[{status_text}]**")
-
-# Strategy Parameters
 st.sidebar.markdown("---")
 st.sidebar.subheader("Strategy Parameters")
+sma_period = st.sidebar.slider("SMA Period (points)", 5, 100, 20, 1, key="sma_period")
+buy_dip_pct_ui = st.sidebar.number_input("Buy below SMA by (%)", min_value=0.01, max_value=50.0, value=0.05, step=0.01, format="%.2f")
+buy_dip_pct = buy_dip_pct_ui / 100.0
+invest_percent = st.sidebar.slider("Invest % of Balance", 1, 100, 90, 1) / 100.0
+take_profit_pct_ui = st.sidebar.number_input("Take Profit at (%)", min_value=0.01, max_value=100.0, value=0.10, step=0.01, format="%.2f")
+take_profit_pct = take_profit_pct_ui / 100.0
+stop_loss_pct_ui = st.sidebar.number_input("Stop Loss at (%)", min_value=0.01, max_value=100.0, value=0.20, step=0.01, format="%.2f")
+stop_loss_pct = stop_loss_pct_ui / 100.0
 
-# SMA Period
-sma_period = st.sidebar.slider("SMA Period (Data Points)", 5, 50, 20, 5, key="sma_period")
+# -------------------------
+# Initialization: load history via REST if empty
+# -------------------------
+if len(st.session_state.data["prices"]) == 0:
+    rest_results = fetch_recent_trades(st.session_state.data.get("symbol", DEFAULT_SYMBOL), limit=200)
+    if rest_results:
+        times, prices = zip(*rest_results)
+        st.session_state.data["times"] = list(times[-MAX_POINTS:])
+        st.session_state.data["prices"] = list(prices[-MAX_POINTS:])
+        # Precompute SMA list aligned with times (None until enough points)
+        st.session_state.data["sma"] = []
+        for i in range(len(st.session_state.data["prices"])):
+            if i + 1 >= sma_period:
+                st.session_state.data["sma"].append(float(np.mean(st.session_state.data["prices"][i + 1 - sma_period : i + 1])))
+            else:
+                st.session_state.data["sma"].append(None)
+        st.session_state.data["current_price"] = st.session_state.data["prices"][-1]
+        print("[main] loaded REST history:", len(st.session_state.data["prices"]))
+    else:
+        print("[main] no REST history available")
 
-# Buy Condition
-st.sidebar.markdown("##### Buy Condition")
-buy_dip_pct = st.sidebar.number_input(
-    "Buy below SMA by (%)", 
-    min_value=0.01, 
-    max_value=1.0, 
-    value=0.05, 
-    step=0.01, 
-    format="%.2f",
-    key="buy_dip_pct_ui"
-) / 100
-st.session_state["buy_dip_pct"] = buy_dip_pct # Store as decimal for math
+# Ensure websocket thread is running
+if st.session_state.get("ws_thread") is None or not getattr(st.session_state.ws_thread, "is_alive", lambda: False)():
+    start_ws(st.session_state.data.get("symbol", DEFAULT_SYMBOL))
 
-invest_percent = st.sidebar.slider("Invest % of Balance", 10, 100, 90, 5, format="%d%%", key="invest_percent_ui") / 100
-st.session_state["invest_percent"] = invest_percent # Store as decimal for math
+# -------------------------
+# Main loop: consume queue and update UI-safe state
+# -------------------------
+q = st.session_state.ws_queue
+drained = False
+while not q.empty():
+    try:
+        ts, price = q.get_nowait()
+    except Exception:
+        break
+    drained = True
+    data = st.session_state.data
 
+    # Append price/time
+    data["current_price"] = float(price)
+    data["prices"].append(float(price))
+    data["times"].append(ts)
 
-# Sell Conditions
-st.sidebar.markdown("##### Sell Conditions")
-take_profit_pct = st.sidebar.number_input(
-    "Take Profit at (%)", 
-    min_value=0.01, 
-    max_value=1.0, 
-    value=0.1, 
-    step=0.01, 
-    format="%.2f",
-    key="take_profit_pct_ui"
-) / 100
-st.session_state["take_profit_pct"] = take_profit_pct # Store as decimal for math
+    # Trim
+    if len(data["prices"]) > MAX_POINTS:
+        data["prices"].pop(0)
+        data["times"].pop(0)
+        if len(data["sma"]) > 0:
+            data["sma"].pop(0)
 
-stop_loss_pct = st.sidebar.number_input(
-    "Stop Loss at (%)", 
-    min_value=0.01, 
-    max_value=1.0, 
-    value=0.2, 
-    step=0.01, 
-    format="%.2f",
-    key="stop_loss_pct_ui"
-) / 100
-st.session_state["stop_loss_pct"] = stop_loss_pct # Store as decimal for math
+    # Compute SMA if possible, otherwise append None to keep aligned
+    if len(data["prices"]) >= sma_period:
+        sma_val = float(np.mean(data["prices"][-sma_period:]))
+        data["sma"].append(sma_val)
+    else:
+        data["sma"].append(None)
 
+    # TRADING LOGIC - performed in main thread to safely mutate session_state
+    if data.get("active", False) and data["sma"][-1] is not None:
+        current_sma = data["sma"][-1]
+        price_f = float(price)
 
-# 2. Main Dashboard
-st.title(f"Live {st.session_state.data['symbol_name']} Trader")
+        # BUY condition (no current shares)
+        if data.get("shares", 0.0) == 0.0 and price_f < current_sma * (1.0 - buy_dip_pct):
+            invest_amount = data["balance"] * invest_percent
+            if invest_amount > 0 and price_f > 0:
+                shares_bought = invest_amount / price_f
+                data["shares"] = shares_bought
+                data["balance"] -= invest_amount
+                data["avg_entry"] = price_f
+                now = ts
+                data["trades"].insert(0, {"time": now, "type": "BUY", "price": price_f, "amount": shares_bought, "pnl": 0.0})
+                save_state(data)
+                print(f"[trade] BUY {shares_bought:.6f} @ {price_f:.2f}")
 
-# Calculate current financial metrics
-current_equity = st.session_state.data["balance"] + (st.session_state.data["shares"] * st.session_state.data["current_price"])
-profit = current_equity - 10000
+        # SELL condition (we hold shares)
+        elif data.get("shares", 0.0) > 0.0:
+            profit_pct = (price_f - data["avg_entry"]) / data["avg_entry"]
+            if profit_pct > take_profit_pct or profit_pct < -stop_loss_pct:
+                revenue = data["shares"] * price_f
+                pnl = revenue - (data["shares"] * data["avg_entry"])
+                data["balance"] += revenue
+                now = ts
+                data["trades"].insert(0, {"time": now, "type": "SELL", "price": price_f, "amount": data["shares"], "pnl": pnl})
+                print(f"[trade] SELL {data['shares']:.6f} @ {price_f:.2f} pnl={pnl:.2f}")
+                data["shares"] = 0.0
+                data["avg_entry"] = 0.0
+                save_state(data)
 
-# Metrics Row
+# Persist after processing batch
+if drained:
+    try:
+        save_state(st.session_state.data)
+    except Exception as e:
+        print("Error saving after processing queue:", e)
+
+# -------------------------
+# UI: Main dashboard
+# -------------------------
+st.title(f"Live {st.session_state.data.get('symbol_name', 'Asset')} Trader (Hybrid)")
+
+data = st.session_state.data
+current_equity = data["balance"] + data["shares"] * data["current_price"]
+profit = current_equity - 10000.0
+
 col1, col2, col3, col4 = st.columns(4)
-
 with col1:
-    st.metric("Live Price", f"${st.session_state.data['current_price']:.2f}")
+    st.metric("Live Price", f"${data['current_price']:.2f}")
 with col2:
     st.metric("Total Equity", f"${current_equity:.2f}")
 with col3:
-    # Use the initial starting balance of 10000 to calculate profit
-    initial_balance = 10000 
-    total_profit = current_equity - initial_balance
-    st.metric("Total Profit", f"${total_profit:.2f}", delta=f"{total_profit:.2f}", delta_color="normal")
+    st.metric("Total Profit", f"${profit:.2f}", delta=f"${profit:.2f}", delta_color="normal")
 with col4:
-    holdings = st.session_state.data["shares"]
-    st.metric("Holdings", f"{holdings:.4f}")
+    st.metric("Holdings", f"{data.get('shares', 0.0):.6f}")
 
-# 3. Live Chart (Plotly)
-if len(st.session_state.data["prices"]) > 0:
+# Chart
+if len(data["prices"]) > 0:
     fig = go.Figure()
-    
-    # Price Line
-    fig.add_trace(go.Scatter(
-        x=st.session_state.data["times"], 
-        y=st.session_state.data["prices"],
-        mode='lines',
-        name='Price',
-        line=dict(color='#00ff00')
-    ))
-
-    # SMA Line
-    # Get the SMA period for the chart name
-    sma_period_current = st.session_state.get("sma_period", 20)
-    
-    if len(st.session_state.data["sma"]) > 0:
-        # Filter out None values and align times
-        valid_sma_data = [(st.session_state.data["times"][i], st.session_state.data["sma"][i]) 
-                          for i in range(len(st.session_state.data["sma"])) 
-                          if st.session_state.data["sma"][i] is not None]
-        
-        sma_times = [t[0] for t in valid_sma_data]
-        sma_values = [t[1] for t in valid_sma_data]
-        
-        fig.add_trace(go.Scatter(
-            x=sma_times,
-            y=sma_values,
-            mode='lines',
-            name=f'SMA ({sma_period_current})',
-            line=dict(color='#ffd700', dash='dash')
-        ))
-
-    fig.update_layout(
-        height=400,
-        margin=dict(l=20, r=20, t=20, b=20),
-        # Ensure plot colors are suitable for dark mode (Streamlit default)
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=True, gridcolor='#333'),
-        font=dict(color='white'),
-        hovermode="x unified"
-    )
+    fig.add_trace(go.Scatter(x=data["times"], y=data["prices"], mode="lines", name="Price"))
+    # SMA
+    valid_sma = [(data["times"][i], data["sma"][i]) for i in range(len(data["sma"])) if data["sma"][i] is not None]
+    if valid_sma:
+        sma_t, sma_v = zip(*valid_sma)
+        fig.add_trace(go.Scatter(x=list(sma_t), y=list(sma_v), mode="lines", name=f"SMA ({sma_period})", line=dict(dash="dash")))
+    fig.update_layout(height=420, margin=dict(l=10, r=10, t=20, b=20), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="white"))
     st.plotly_chart(fig, use_container_width=True)
-
 else:
-    # Use the current SMA period in the warning message
-    st.warning(f"Waiting for live market data stream... (This may take a moment to collect {st.session_state.get('sma_period', 20)} data points for the SMA)")
+    st.warning(f"Waiting for live market data... (need {sma_period} points for SMA)")
 
-# 4. Trade Log
+# Trade log
 st.subheader("Transaction History")
-if len(st.session_state.data["trades"]) > 0:
-    df = pd.DataFrame(st.session_state.data["trades"])
-    # Format P&L for better readability
-    df['pnl'] = df['pnl'].apply(lambda x: f"${x:.2f}")
-    df['price'] = df['price'].apply(lambda x: f"${x:.2f}")
-
-    st.dataframe(df, use_container_width=True, hide_index=True)
+if len(data["trades"]) > 0:
+    df = pd.DataFrame(data["trades"])
+    df = df.rename(columns={"time": "Time", "type": "Type", "price": "Price", "amount": "Amount", "pnl": "P&L"})
+    df["Price"] = df["Price"].apply(lambda x: f"${x:.2f}")
+    df["P&L"] = df["P&L"].apply(lambda x: f"${x:.2f}")
+    st.dataframe(df, use_container_width=True)
 else:
-    st.text("No trades executed yet. Press '🟢 START BOT' to begin paper trading.")
+    st.text("No trades yet. Press START BOT to begin paper trading.")
 
-# Auto-refresh mechanism (Streamlit needs this to update the UI based on the background thread)
-time.sleep(1) 
-st.rerun()
+# Connection status footer & manual controls
+st.markdown("---")
+colA, colB, colC = st.columns([2, 1, 1])
+with colA:
+    ws_alive = st.session_state.get("ws_thread") is not None and getattr(st.session_state.ws_thread, "is_alive", lambda: False)()
+    st.write(f"WebSocket thread alive: {ws_alive}  |  Queue size: {st.session_state.ws_queue.qsize()}")
+with colB:
+    if st.button("Reconnect WS"):
+        start_ws(st.session_state.data.get("symbol", DEFAULT_SYMBOL))
+with colC:
+    if st.button("Force Save State"):
+        save_state(st.session_state.data)
+        st.toast("State saved", icon="💾")
+
+# -------------------------
+# Auto-refresh mechanism
+# -------------------------
+# Light-weight rerun to process incoming queue items; avoid busy sleep loops
+nowt = time.time()
+if nowt - st.session_state.last_refresh > 1.0:
+    st.session_state.last_refresh = nowt
+    st.experimental_rerun()
