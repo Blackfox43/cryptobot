@@ -51,6 +51,13 @@ def run_websocket():
             now = datetime.now().strftime("%H:%M:%S")
             data = st.session_state.data
             
+            # Retrieve parameters set by the user in the UI
+            SMA_PERIOD = st.session_state.get("sma_period", 20)
+            BUY_DIP_PCT = st.session_state.get("buy_dip_pct", 0.0005) # Default 0.05%
+            TAKE_PROFIT_PCT = st.session_state.get("take_profit_pct", 0.001) # Default 0.1%
+            STOP_LOSS_PCT = st.session_state.get("stop_loss_pct", 0.002) # Default 0.2%
+            INVEST_PERCENT = st.session_state.get("invest_percent", 0.9) # Default 90%
+            
             # 1. Update Price Data
             data["current_price"] = price
             data["prices"].append(price)
@@ -63,8 +70,7 @@ def run_websocket():
                 data["times"].pop(0)
                 if len(data["sma"]) > 0: data["sma"].pop(0)
 
-            # 2. Calculate SMA (Simple Moving Average - 20 periods)
-            SMA_PERIOD = 20
+            # 2. Calculate SMA (Simple Moving Average - based on user input)
             if len(data["prices"]) >= SMA_PERIOD:
                 sma_val = np.mean(data["prices"][-SMA_PERIOD:])
                 data["sma"].append(sma_val)
@@ -75,9 +81,10 @@ def run_websocket():
             if data["active"] and data["sma"][-1] is not None:
                 current_sma = data["sma"][-1]
                 
-                # BUY CONDITION: Price is 0.05% below SMA (Buy the dip - Mean Reversion)
-                if data["shares"] == 0 and price < current_sma * 0.9995:
-                    invest_amount = data["balance"] * 0.9 # Invest 90% of available balance
+                # BUY CONDITION: Price is below the SMA by the user-defined percentage
+                # The logic is: price < current_sma * (1 - BUY_DIP_PCT)
+                if data["shares"] == 0 and price < current_sma * (1 - BUY_DIP_PCT):
+                    invest_amount = data["balance"] * INVEST_PERCENT
                     if invest_amount > 0:
                         data["shares"] = invest_amount / price
                         data["balance"] -= invest_amount
@@ -88,12 +95,12 @@ def run_websocket():
                             "amount": data["shares"], "pnl": 0
                         })
                 
-                # SELL CONDITION: Take Profit (0.1%) or Stop Loss (-0.2%)
+                # SELL CONDITION: Take Profit or Stop Loss
                 elif data["shares"] > 0:
                     profit_pct = (price - data["avg_entry"]) / data["avg_entry"]
                     
-                    # Check for Take Profit or Stop Loss
-                    if profit_pct > 0.001 or profit_pct < -0.002:
+                    # Check for Take Profit (profit_pct > TAKE_PROFIT_PCT) or Stop Loss (profit_pct < -STOP_LOSS_PCT)
+                    if profit_pct > TAKE_PROFIT_PCT or profit_pct < -STOP_LOSS_PCT:
                         revenue = data["shares"] * price
                         pnl = revenue - (data["shares"] * data["avg_entry"])
                         data["balance"] += revenue
@@ -173,15 +180,54 @@ status_color = "green" if st.session_state.data["active"] else "red"
 status_text = "RUNNING" if st.session_state.data['active'] else "STOPPED"
 st.sidebar.markdown(f"Status: **:{status_color}[{status_text}]**")
 
-# Strategy Info
+# Strategy Parameters
 st.sidebar.markdown("---")
-st.sidebar.subheader("Strategy Logic")
-st.sidebar.info("""
-**Mean Reversion (20-period SMA):**
-- **Buy:** Price drops 0.05% below the Simple Moving Average.
-- **Sell (Take Profit):** Profit reaches > 0.1%.
-- **Sell (Stop Loss):** Loss reaches > 0.2%.
-""")
+st.sidebar.subheader("Strategy Parameters")
+
+# SMA Period
+sma_period = st.sidebar.slider("SMA Period (Data Points)", 5, 50, 20, 5, key="sma_period")
+
+# Buy Condition
+st.sidebar.markdown("##### Buy Condition")
+buy_dip_pct = st.sidebar.number_input(
+    "Buy below SMA by (%)", 
+    min_value=0.01, 
+    max_value=1.0, 
+    value=0.05, 
+    step=0.01, 
+    format="%.2f",
+    key="buy_dip_pct_ui"
+) / 100
+st.session_state["buy_dip_pct"] = buy_dip_pct # Store as decimal for math
+
+invest_percent = st.sidebar.slider("Invest % of Balance", 10, 100, 90, 5, format="%d%%", key="invest_percent_ui") / 100
+st.session_state["invest_percent"] = invest_percent # Store as decimal for math
+
+
+# Sell Conditions
+st.sidebar.markdown("##### Sell Conditions")
+take_profit_pct = st.sidebar.number_input(
+    "Take Profit at (%)", 
+    min_value=0.01, 
+    max_value=1.0, 
+    value=0.1, 
+    step=0.01, 
+    format="%.2f",
+    key="take_profit_pct_ui"
+) / 100
+st.session_state["take_profit_pct"] = take_profit_pct # Store as decimal for math
+
+stop_loss_pct = st.sidebar.number_input(
+    "Stop Loss at (%)", 
+    min_value=0.01, 
+    max_value=1.0, 
+    value=0.2, 
+    step=0.01, 
+    format="%.2f",
+    key="stop_loss_pct_ui"
+) / 100
+st.session_state["stop_loss_pct"] = stop_loss_pct # Store as decimal for math
+
 
 # 2. Main Dashboard
 st.title(f"Live {st.session_state.data['symbol_name']} Trader")
@@ -217,6 +263,9 @@ if len(st.session_state.data["prices"]) > 0:
     ))
 
     # SMA Line
+    # Get the SMA period for the chart name
+    sma_period_current = st.session_state.get("sma_period", 20)
+    
     if len(st.session_state.data["sma"]) > 0:
         # Filter out None values and align times
         valid_sma_data = [(st.session_state.data["times"][i], st.session_state.data["sma"][i]) 
@@ -230,7 +279,7 @@ if len(st.session_state.data["prices"]) > 0:
             x=sma_times,
             y=sma_values,
             mode='lines',
-            name='SMA (20)',
+            name=f'SMA ({sma_period_current})',
             line=dict(color='#ffd700', dash='dash')
         ))
 
@@ -248,7 +297,8 @@ if len(st.session_state.data["prices"]) > 0:
     st.plotly_chart(fig, use_container_width=True)
 
 else:
-    st.warning("Waiting for live market data stream... (This may take a moment to collect 20 data points for the SMA)")
+    # Use the current SMA period in the warning message
+    st.warning(f"Waiting for live market data stream... (This may take a moment to collect {st.session_state.get('sma_period', 20)} data points for the SMA)")
 
 # 4. Trade Log
 st.subheader("Transaction History")
