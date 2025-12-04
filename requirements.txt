@@ -1,5 +1,1 @@
-streamlit
-websocket-client
-pandas
-numpy
-plotly
+pip install streamlit requests numpy pandas plotly python-dateutil
