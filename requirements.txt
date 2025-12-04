@@ -1,1 +1,6 @@
-pip install streamlit requests numpy pandas plotly python-dateutil
+streamlit==1.31.1
+requests==2.31.0
+numpy==1.26.4
+pandas==2.1.4
+plotly==5.18.0
+python-dateutil==2.8.2
