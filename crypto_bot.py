@@ -507,4 +507,5 @@ for k, v in alive.items():
 
 # Auto-refresh
 time.sleep(1)
-st.experimental_rerun()
+st.rerun()
+
