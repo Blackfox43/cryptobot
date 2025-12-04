@@ -353,19 +353,39 @@ profit = equity - 10000
 
 # Calculate unrealized PNL (only if holding shares)
 unrealized_pnl = 0
+pnl_delta_value = None # This will hold the numerical delta for st.metric
+pnl_color_mode = "off"
+
 if state["shares"] > 0 and state["avg_entry"] > 0:
     unrealized_pnl = state["shares"] * (state["current_price"] - state["avg_entry"])
-    pnl_color = "green" if unrealized_pnl >= 0 else "red"
-    pnl_sign = "+" if unrealized_pnl >= 0 else ""
+    
+    # FIX 1: Provide the numerical PNL as the delta argument.
+    pnl_delta_value = unrealized_pnl
+
+    # Streamlit requires one of its keywords for delta_color
+    # 'normal' means positive delta is green, negative is red.
+    pnl_color_mode = "normal" 
+
+    # Removed the unnecessary pnl_color and pnl_sign variables here.
+    
 else:
-    pnl_color = "gray"
-    pnl_sign = ""
+    # If no shares, PNL is 0. Set delta to None to hide the arrow/delta text in the metric.
+    pnl_color_mode = "off" 
+    pnl_delta_value = None
 
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric(f"{current_asset.symbol} Price", f"${state['current_price']:.4f}")
 col2.metric("Cash Balance", f"${state['balance']:.2f}")
 col3.metric("Shares Held", f"{state['shares']:.4f}")
-col4.metric("Unrealized PNL", f"{pnl_sign}{unrealized_pnl:.2f}", delta_color=pnl_color)
+
+# FIX 2: Corrected st.metric call (the line that caused the error)
+col4.metric(
+    "Unrealized PNL", 
+    f"${unrealized_pnl:.2f}", # Display the PNL value itself.
+    delta=pnl_delta_value,    # <--- CRITICAL FIX: Pass the numerical value as delta
+    delta_color=pnl_color_mode # Pass the Streamlit keyword
+)
+
 col5.metric("Total Equity", f"${equity:.2f}")
 
 # Chart
@@ -451,4 +471,3 @@ else:
 # Auto-refresh mechanism
 time.sleep(1)
 st.rerun()
-
