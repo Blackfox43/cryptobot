@@ -15,7 +15,8 @@ import plotly.graph_objects as go
 #            STREAMLIT APP CONFIG
 # ======================================================
 st.set_page_config(page_title="Bybit Algo Trader", layout="wide")
-POLL_INTERVAL = 3
+# FIX: Increase polling interval to reduce API rate limit issues (was 3)
+POLL_INTERVAL = 15 
 STATE_FILE = "state.json"
 PROVIDER_NAME = "Bybit (Linear Perpetual)"
 BYBIT_URL = "https://api.bybit.com/v5/market/tickers"
@@ -106,6 +107,7 @@ def fetch_price(asset: Asset):
 
         # Check for Bybit API specific error codes
         if data.get("retCode") != 0:
+            # Note: This print statement should handle the 429 error if Bybit is the source
             print(f"Bybit API Error ({data.get('retCode')}): {data.get('retMsg')}")
             return None
 
@@ -326,13 +328,15 @@ if len(state["times"]) > 0:
     # Handle the case where the Streamlit rerun happens slightly after the thread updates the time
     try:
         last_dt = datetime.strptime(last_ts, "%H:%M:%S")
+        # Check if the delay is slightly longer than the new 15-second interval
         delay = (datetime.now() - last_dt).total_seconds()
     except ValueError:
         delay = POLL_INTERVAL * 2 # Assume slow if parsing fails temporarily
 
-    if delay < POLL_INTERVAL + 3:
+    # Updated connection status logic to account for the longer POLL_INTERVAL
+    if delay < POLL_INTERVAL + 5: # Give 5 extra seconds tolerance
         conn = "🟢 Live"
-    elif delay < 20:
+    elif delay < 60:
         conn = "🟡 Slow"
     else:
         conn = "🔴 Disconnected"
@@ -353,17 +357,16 @@ profit = equity - 10000
 
 # Calculate unrealized PNL (only if holding shares)
 unrealized_pnl = 0
-pnl_delta_value = None # This will hold the numerical delta for st.metric
+pnl_delta_value = None
 pnl_color_mode = "off"
 
 if state["shares"] > 0 and state["avg_entry"] > 0:
     unrealized_pnl = state["shares"] * (state["current_price"] - state["avg_entry"])
     
-    # FIX 1: Provide the numerical PNL as the delta argument.
+    # FIX 1 (from previous response): Provide the numerical PNL as the delta argument.
     pnl_delta_value = unrealized_pnl
 
     # Streamlit requires one of its keywords for delta_color
-    # 'normal' means positive delta is green, negative is red.
     pnl_color_mode = "normal" 
 
     # Removed the unnecessary pnl_color and pnl_sign variables here.
@@ -378,7 +381,7 @@ col1.metric(f"{current_asset.symbol} Price", f"${state['current_price']:.4f}")
 col2.metric("Cash Balance", f"${state['balance']:.2f}")
 col3.metric("Shares Held", f"{state['shares']:.4f}")
 
-# FIX 2: Corrected st.metric call (the line that caused the error)
+# FIX 2 (from previous response): Corrected st.metric call 
 col4.metric(
     "Unrealized PNL", 
     f"${unrealized_pnl:.2f}", # Display the PNL value itself.
