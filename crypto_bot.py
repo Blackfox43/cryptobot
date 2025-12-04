@@ -10,40 +10,72 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-# ================================
-#         CONFIGURATION
-# ================================
+# ======================================================
+#                STREAMLIT CONFIG
+# ======================================================
 st.set_page_config(page_title="Algo Trader", layout="wide")
 
-POLL_INTERVAL = 3        # seconds
+POLL_INTERVAL = 3  # seconds
 STATE_FILE = "state.json"
 
-# --------------------------
-# Supported Assets (12)
-# --------------------------
-ASSETS = {
-    "btcusdt": ("bitcoin", "Bitcoin"),
-    "ethusdt": ("ethereum", "Ethereum"),
-    "bnbusdt": ("binancecoin", "BNB"),
-    "solusdt": ("solana", "Solana"),
-    "xrpusdt": ("ripple", "XRP"),
-    "dogeusdt": ("dogecoin", "Dogecoin"),
-    "adausdt": ("cardano", "Cardano"),
-    "avaxusdt": ("avalanche-2", "Avalanche"),
-    "dotusdt": ("polkadot", "Polkadot"),
-    "linkusdt": ("chainlink", "Chainlink"),
-    "maticusdt": ("matic-network", "Polygon"),
-    "shibusdt": ("shiba-inu", "Shiba Inu")
+# ======================================================
+#           SUPPORTED ASSETS (12 coins)
+# ======================================================
+
+# ---- CoinGecko IDs ----
+CG_IDS = {
+    "btcusdt": "bitcoin",
+    "ethusdt": "ethereum",
+    "bnbusdt": "binancecoin",
+    "solusdt": "solana",
+    "xrpusdt": "ripple",
+    "dogeusdt": "dogecoin",
+    "adausdt": "cardano",
+    "avaxusdt": "avalanche-2",
+    "dotusdt": "polkadot",
+    "linkusdt": "chainlink",
+    "maticusdt": "matic-network",
+    "shibusdt": "shiba-inu"
 }
 
-# CoinGecko API
+# ---- CoinPaprika IDs (Correct full ticker IDs) ----
+CP_IDS = {
+    "btcusdt": "btc-bitcoin",
+    "ethusdt": "eth-ethereum",
+    "bnbusdt": "bnb-binance-coin",
+    "solusdt": "sol-solana",
+    "xrpusdt": "xrp-xrp",
+    "dogeusdt": "doge-dogecoin",
+    "adausdt": "ada-cardano",
+    "avaxusdt": "avax-avalanche",
+    "dotusdt": "dot-polkadot",
+    "linkusdt": "link-chainlink",
+    "maticusdt": "matic-polygon",
+    "shibusdt": "shib-shiba-inu"
+}
+
+ASSET_NAMES = {
+    "btcusdt": "Bitcoin",
+    "ethusdt": "Ethereum",
+    "bnbusdt": "BNB",
+    "solusdt": "Solana",
+    "xrpusdt": "XRP",
+    "dogeusdt": "Dogecoin",
+    "adausdt": "Cardano",
+    "avaxusdt": "Avalanche",
+    "dotusdt": "Polkadot",
+    "linkusdt": "Chainlink",
+    "maticusdt": "Polygon",
+    "shibusdt": "Shiba Inu"
+}
+
 CG_URL = "https://api.coingecko.com/api/v3/simple/price"
-CURRENT_PROVIDER = "coingecko"   # fallback system
+CURRENT_PROVIDER = "coingecko"
 
 
-# ================================
-#         LOAD / SAVE STATE
-# ================================
+# ======================================================
+#           LOAD / SAVE STATE
+# ======================================================
 def load_state():
     if not os.path.exists(STATE_FILE):
         return None
@@ -55,7 +87,7 @@ def load_state():
 
 
 def save_state(state):
-    safe_state = {
+    safe = {
         "balance": state["balance"],
         "shares": state["shares"],
         "avg_entry": state["avg_entry"],
@@ -64,46 +96,49 @@ def save_state(state):
         "symbol_name": state["symbol_name"]
     }
     with open(STATE_FILE, "w") as f:
-        json.dump(safe_state, f, indent=4)
+        json.dump(safe, f, indent=4)
 
 
-# ================================
-#   FALLBACK PRICE PROVIDER LOGIC
-# ================================
-def get_price(symbol_id):
+# ======================================================
+#           PRICE PROVIDERS (CG + CP)
+# ======================================================
+def get_price(symbol):
+    """Return live price using CoinGecko with fallback to CoinPaprika."""
     global CURRENT_PROVIDER
 
-    # ---------------------
+    cg_id = CG_IDS[symbol]
+    cp_id = CP_IDS[symbol]
+
+    # -----------------------
     # Primary: CoinGecko
-    # ---------------------
+    # -----------------------
     if CURRENT_PROVIDER == "coingecko":
         try:
-            resp = requests.get(
+            r = requests.get(
                 CG_URL,
-                params={"ids": symbol_id, "vs_currencies": "usd"},
+                params={"ids": cg_id, "vs_currencies": "usd"},
                 timeout=6
             )
-            if resp.status_code == 200:
-                data = resp.json()
-                p = data.get(symbol_id, {}).get("usd")
+            if r.status_code == 200:
+                d = r.json()
+                p = d.get(cg_id, {}).get("usd")
                 if p is not None:
                     return float(p)
+
             CURRENT_PROVIDER = "coinpaprika"
         except:
             CURRENT_PROVIDER = "coinpaprika"
 
-    # ---------------------
+    # -----------------------
     # Fallback: CoinPaprika
-    # ---------------------
+    # -----------------------
     if CURRENT_PROVIDER == "coinpaprika":
         try:
-            cp_id = symbol_id
             url = f"https://api.coinpaprika.com/v1/tickers/{cp_id}"
-            resp = requests.get(url, timeout=6)
-
-            if resp.status_code == 200:
-                data = resp.json()
-                p = data.get("quotes", {}).get("USD", {}).get("price")
+            r = requests.get(url, timeout=6)
+            if r.status_code == 200:
+                d = r.json()
+                p = d.get("quotes", {}).get("USD", {}).get("price")
                 if p is not None:
                     return float(p)
 
@@ -114,21 +149,22 @@ def get_price(symbol_id):
     return None
 
 
-# ================================
-#       POLLER THREAD
-# ================================
-def price_poller(symbol_id, q, stop_event):
+# ======================================================
+#           POLLER THREAD
+# ======================================================
+def price_poller(symbol, q, stop_event):
+    """Continuously poll prices and push into queue."""
     while not stop_event.is_set():
-        price = get_price(symbol_id)
+        price = get_price(symbol)
         if price is not None:
             ts = datetime.now().strftime("%H:%M:%S")
             q.put((ts, price))
         time.sleep(POLL_INTERVAL)
 
 
-# ================================
-#    INITIALIZE SESSION STATE
-# ================================
+# ======================================================
+#       INITIALIZE STATE
+# ======================================================
 if "state" not in st.session_state:
     saved = load_state()
     if saved:
@@ -165,93 +201,77 @@ if "poll_thread" not in st.session_state:
     st.session_state.poll_thread = None
 
 
-# ================================
-#           SIDEBAR
-# ================================
+# ======================================================
+#            SIDEBAR UI
+# ======================================================
 st.sidebar.title("Control Panel")
 
-# Asset picker
-sel = st.sidebar.selectbox(
+symbol = st.sidebar.selectbox(
     "Select Asset",
-    list(ASSETS.keys()),
-    format_func=lambda x: ASSETS[x][1]
+    list(ASSET_NAMES.keys()),
+    format_func=lambda x: ASSET_NAMES[x]
 )
 
-if sel != st.session_state.state["symbol"]:
-    st.session_state.state["symbol"] = sel
-    st.session_state.state["symbol_name"] = ASSETS[sel][1]
+# Switch symbol
+if symbol != st.session_state.state["symbol"]:
+    st.session_state.state["symbol"] = symbol
+    st.session_state.state["symbol_name"] = ASSET_NAMES[symbol]
     st.session_state.state["prices"] = []
     st.session_state.state["sma"] = []
     st.session_state.state["times"] = []
     st.session_state.state["current_price"] = 0.0
+
     st.session_state.stop_event.set()
-    st.session_state.poll_thread = None
     st.session_state.stop_event = threading.Event()
+    st.session_state.poll_thread = None
 
-# SMA
+# Strategy settings
 SMA_PERIOD = st.sidebar.slider("SMA Period", 5, 50, 20, 5)
-
-# Buy/Sell params
 BUY_DIP = st.sidebar.number_input("Buy Below SMA (%)", 0.01, 5.0, 0.5) / 100
 TAKE_PROFIT = st.sidebar.number_input("Take Profit (%)", 0.1, 5.0, 1.0) / 100
 STOP_LOSS = st.sidebar.number_input("Stop Loss (%)", 0.1, 5.0, 2.0) / 100
 INVEST_PERCENT = st.sidebar.slider("Invest %", 10, 100, 90) / 100
 
-
-# --------------------------
-# RESET BUTTON
-# --------------------------
 def reset_all():
     if os.path.exists(STATE_FILE):
         os.remove(STATE_FILE)
     st.session_state.state = {
-        "prices": [],
-        "times": [],
-        "sma": [],
-        "balance": 10000.0,
-        "shares": 0.0,
-        "avg_entry": 0.0,
-        "trades": [],
-        "active": False,
+        "prices": [], "times": [], "sma": [],
+        "balance": 10000.0, "shares": 0.0, "avg_entry": 0.0,
+        "trades": [], "active": False,
         "current_price": 0.0,
-        "symbol": st.session_state.state["symbol"],
-        "symbol_name": st.session_state.state["symbol_name"]
+        "symbol": symbol,
+        "symbol_name": ASSET_NAMES[symbol]
     }
     st.session_state.price_queue = queue.Queue()
 
-
 st.sidebar.button("Reset Balance & History", on_click=reset_all)
 
-
-# ================================
-#     START / STOP BOT
-# ================================
+# Start / Stop
 if st.sidebar.button("Start Bot" if not st.session_state.state["active"] else "Stop Bot"):
     st.session_state.state["active"] = not st.session_state.state["active"]
 
     if st.session_state.state["active"]:
         st.session_state.stop_event.clear()
-        symbol_id = ASSETS[st.session_state.state["symbol"]][0]
-
-        thread = threading.Thread(
+        t = threading.Thread(
             target=price_poller,
-            args=(symbol_id, st.session_state.price_queue, st.session_state.stop_event),
+            args=(symbol, st.session_state.price_queue, st.session_state.stop_event),
             daemon=True
         )
-        thread.start()
-        st.session_state.poll_thread = thread
-
+        t.start()
+        st.session_state.poll_thread = t
     else:
         st.session_state.stop_event.set()
 
 
-# ================================
-#       PROCESS QUEUE DATA
-# ================================
+# ======================================================
+#       PROCESS PRICE QUEUE
+# ======================================================
 state = st.session_state.state
 
 while not st.session_state.price_queue.empty():
     ts, price = st.session_state.price_queue.get()
+
     state["current_price"] = price
     state["prices"].append(price)
     state["times"].append(ts)
@@ -262,54 +282,59 @@ while not st.session_state.price_queue.empty():
         if state["sma"]:
             state["sma"].pop(0)
 
-    # SMA
     if len(state["prices"]) >= SMA_PERIOD:
-        val = np.mean(state["prices"][-SMA_PERIOD:])
-        state["sma"].append(val)
+        state["sma"].append(np.mean(state["prices"][-SMA_PERIOD:]))
     else:
         state["sma"].append(None)
 
-    # Trading logic
+    # ------------------------------
+    #         TRADING LOGIC
+    # ------------------------------
     if state["active"] and state["sma"][-1] is not None:
-        sma_val = state["sma"][-1]
-        price_now = price
+        sma = state["sma"][-1]
 
         # BUY
-        if state["shares"] == 0 and price_now < sma_val * (1 - BUY_DIP):
+        if state["shares"] == 0 and price < sma * (1 - BUY_DIP):
             invest = state["balance"] * INVEST_PERCENT
             if invest > 0:
-                state["shares"] = invest / price_now
+                state["shares"] = invest / price
                 state["balance"] -= invest
-                state["avg_entry"] = price_now
+                state["avg_entry"] = price
                 state["trades"].insert(0, {
-                    "time": ts, "type": "BUY", "price": price_now, "amount": state["shares"], "pnl": 0
+                    "time": ts, "type": "BUY",
+                    "price": price, "amount": state["shares"],
+                    "pnl": 0
                 })
                 save_state(state)
 
         # SELL
         elif state["shares"] > 0:
-            pct = (price_now - state["avg_entry"]) / state["avg_entry"]
+            pct = (price - state["avg_entry"]) / state["avg_entry"]
             if pct > TAKE_PROFIT or pct < -STOP_LOSS:
-                revenue = state["shares"] * price_now
+                revenue = state["shares"] * price
                 pnl = revenue - (state["shares"] * state["avg_entry"])
+
                 state["balance"] += revenue
                 state["trades"].insert(0, {
-                    "time": ts, "type": "SELL", "price": price_now, "amount": state["shares"], "pnl": pnl
+                    "time": ts, "type": "SELL",
+                    "price": price, "amount": state["shares"],
+                    "pnl": pnl
                 })
+
                 state["shares"] = 0
                 state["avg_entry"] = 0
                 save_state(state)
 
 
-# ================================
-#       CONNECTION ICON LOGIC
-# ================================
+# ======================================================
+#       CONNECTION ICON
+# ======================================================
 if len(state["times"]) > 0:
-    last_ts = state["times"][-1]
-    last_dt = datetime.strptime(last_ts, "%H:%M:%S")
+    last = state["times"][-1]
+    last_dt = datetime.strptime(last, "%H:%M:%S")
     delay = (datetime.now() - last_dt).total_seconds()
 
-    if delay < POLL_INTERVAL + 3:
+    if delay < POLL_INTERVAL + 2:
         conn = "🟢 Live"
     elif delay < 20:
         conn = "🟡 Slow"
@@ -319,75 +344,67 @@ else:
     conn = "🔴 Waiting"
 
 
-# ================================
-#          MAIN UI
-# ================================
-st.title(f"Live {state['symbol_name']} Trader")
+# ======================================================
+#            MAIN UI
+# ======================================================
+st.title(f"{state['symbol_name']} Algo Trader")
 st.markdown(f"### Connection Status: {conn}")
-st.caption(f"Price Provider: **{CURRENT_PROVIDER}**")
+st.caption(f"Provider: **{CURRENT_PROVIDER}**")
 
-# Metrics
 equity = state["balance"] + state["shares"] * state["current_price"]
 profit = equity - 10000
 
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Live Price", f"${state['current_price']:.2f}")
+col1.metric("Price", f"${state['current_price']:.4f}")
 col2.metric("Balance", f"${state['balance']:.2f}")
 col3.metric("Equity", f"${equity:.2f}")
 col4.metric("Profit", f"${profit:.2f}", delta=f"{profit:.2f}")
 
-# ================================
-#        PRICE + SMA CHART
-# ================================
+# Chart
 if len(state["prices"]) > 0:
     fig = go.Figure()
 
     fig.add_trace(go.Scatter(
         x=state["times"], y=state["prices"],
-        mode="lines", name="Price", line=dict(color="#00ff00")
+        mode="lines", name="Price",
+        line=dict(color="lime")
     ))
 
-    sma_clean = [
-        (state["times"][i], state["sma"][i])
-        for i in range(len(state["sma"]))
-        if state["sma"][i] is not None
-    ]
+    clean_sma = [(state["times"][i], state["sma"][i])
+                 for i in range(len(state["sma"]))
+                 if state["sma"][i] is not None]
 
-    if sma_clean:
+    if clean_sma:
         fig.add_trace(go.Scatter(
-            x=[x[0] for x in sma_clean],
-            y=[x[1] for x in sma_clean],
+            x=[t[0] for t in clean_sma],
+            y=[t[1] for t in clean_sma],
             mode="lines",
-            name=f"SMA ({SMA_PERIOD})",
-            line=dict(color="#ffd700", dash="dash")
+            name=f"SMA {SMA_PERIOD}",
+            line=dict(color="gold", dash="dash")
         ))
 
     fig.update_layout(
-        height=400,
-        margin=dict(l=20, r=20, t=20, b=20),
+        height=420,
+        margin=dict(l=15, r=15, t=10, b=10),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color="white")
     )
+
     st.plotly_chart(fig, use_container_width=True)
 else:
-    st.warning("Waiting for price data...")
+    st.warning("Waiting for price data…")
 
-# ================================
-#       TRADE HISTORY TABLE
-# ================================
-st.subheader("Trade Log")
-
+# Trade Log
+st.subheader("Trades")
 if state["trades"]:
     df = pd.DataFrame(state["trades"])
     df["price"] = df["price"].apply(lambda x: f"${x:.4f}")
     df["pnl"] = df["pnl"].apply(lambda x: f"${x:.4f}")
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, hide_index=True, use_container_width=True)
 else:
-    st.info("No trades yet.")
+    st.info("No trades executed yet.")
 
-# ================================
-#   AUTO REFRESH LOOP
-# ================================
+# Auto-refresh
 time.sleep(1)
 st.rerun()
