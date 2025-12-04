@@ -10,12 +10,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-import requests
-try:
-    r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=5)
-    st.write("Binance Test:", r.status_code, r.text[:100])
-except Exception as e:
-    st.write("Binance Error:", str(e))
+
 # ======================================================
 #            STREAMLIT APP CONFIG
 # ======================================================
@@ -375,4 +370,5 @@ else:
 # Auto-refresh
 time.sleep(1)
 st.rerun()
+
 
