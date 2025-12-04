@@ -14,62 +14,95 @@ import plotly.graph_objects as go
 # ======================================================
 #            STREAMLIT APP CONFIG
 # ======================================================
-st.set_page_config(page_title="Bybit Algo Trader", layout="wide")
-# FIX: Increase polling interval to reduce API rate limit issues (was 3)
-POLL_INTERVAL = 15 
+st.set_page_config(page_title="Algo Trader", layout="wide")
+POLL_INTERVAL = 3
 STATE_FILE = "state.json"
-PROVIDER_NAME = "Bybit (Linear Perpetual)"
-BYBIT_URL = "https://api.bybit.com/v5/market/tickers"
+
 
 # ======================================================
-#            ASSET CLASS
+#            ASSET CLASS (OPTION C)
 # ======================================================
 class Asset:
-    """A minimal class to hold asset information."""
-    def __init__(self, symbol, name):
-        # symbol is the Bybit market symbol (e.g., "BTCUSDT")
-        self.symbol = symbol
-        self.name = name
+    def __init__(self, symbol, name, bybit_symbol):
+        self.symbol = symbol          # e.g. btcusdt
+        self.name = name              # e.g. Bitcoin
+        self.bybit_symbol = bybit_symbol   # e.g. BTCUSDT
 
 
 # ======================================================
-#            ASSET REGISTRY (Using Bybit Symbols)
+#            ASSET REGISTRY (12 COINS)
 # ======================================================
 ASSETS = {
-    # Keys remain lowercase for session state/UI compatibility, value uses Bybit format
-    "btcusdt": Asset("BTCUSDT", "Bitcoin"),
-    "ethusdt": Asset("ETHUSDT", "Ethereum"),
-    "bnbusdt": Asset("BNBUSDT", "BNB"),
-    "solusdt": Asset("SOLUSDT", "Solana"),
-    "xrpusdt": Asset("XRPUSDT", "XRP"),
-    "dogeusdt": Asset("DOGEUSDT", "Dogecoin"),
-    "adausdt": Asset("ADAUSDT", "Cardano"),
-    "avaxusdt": Asset("AVAXUSDT", "Avalanche"),
-    "dotusdt": Asset("DOTUSDT", "Polkadot"),
-    "linkusdt": Asset("LINKUSDT", "Chainlink"),
-    "maticusdt": Asset("MATICUSDT", "Polygon"),
-    "shibusdt": Asset("SHIBUSDT", "Shiba Inu"),
+    "btcusdt": Asset("btcusdt", "Bitcoin", "BTCUSDT"),
+    "ethusdt": Asset("ethusdt", "Ethereum", "ETHUSDT"),
+    "bnbusdt": Asset("bnbusdt", "BNB", "BNBUSDT"),
+    "solusdt": Asset("solusdt", "Solana", "SOLUSDT"),
+    "xrpusdt": Asset("xrpusdt", "XRP", "XRPUSDT"),
+    "dogeusdt": Asset("dogeusdt", "Dogecoin", "DOGEUSDT"),
+    "adausdt": Asset("adausdt", "Cardano", "ADAUSDT"),
+    "avaxusdt": Asset("avaxusdt", "Avalanche", "AVAXUSDT"),
+    "dotusdt": Asset("dotusdt", "Polkadot", "DOTUSDT"),
+    "linkusdt": Asset("linkusdt", "Chainlink", "LINKUSDT"),
+    "maticusdt": Asset("maticusdt", "Polygon", "MATICUSDT"),
+    "shibusdt": Asset("shibusdt", "Shiba Inu", "SHIBUSDT"),
 }
+
+
+# ======================================================
+#              BYBIT PRICE PROVIDER
+# ======================================================
+def fetch_bybit_price(asset: Asset):
+    """
+    Calls Bybit Spot price API.
+    Works in Nigeria and globally without restriction.
+    """
+    url = "https://api.bybit.com/v5/market/tickers"
+    params = {
+        "category": "spot",
+        "symbol": asset.bybit_symbol
+    }
+
+    try:
+        r = requests.get(url, params=params, timeout=6)
+        if r.status_code == 200:
+            data = r.json()
+            lst = data.get("result", {}).get("list", [])
+            if lst:
+                price = lst[0].get("lastPrice")
+                if price is not None:
+                    return float(price)
+        return None
+    except:
+        return None
+
+
+# ======================================================
+#             POLLER THREAD (Bybit only)
+# ======================================================
+def price_poller(asset: Asset, q, stop_event):
+    while not stop_event.is_set():
+        price = fetch_bybit_price(asset)
+        if price is not None:
+            ts = datetime.now().strftime("%H:%M:%S")
+            q.put((ts, price))
+        time.sleep(POLL_INTERVAL)
 
 
 # ======================================================
 #               LOAD / SAVE STATE
 # ======================================================
 def load_state():
-    """Loads trading state from a local JSON file."""
     if not os.path.exists(STATE_FILE):
         return None
 
     try:
         with open(STATE_FILE, "r") as f:
             return json.load(f)
-    except Exception as e:
-        print(f"Error loading state: {e}")
+    except:
         return None
 
 
 def save_state(state):
-    """Saves critical trading state to a local JSON file."""
     safe = {
         "balance": state["balance"],
         "shares": state["shares"],
@@ -78,69 +111,8 @@ def save_state(state):
         "symbol": state["symbol"],
         "symbol_name": state["symbol_name"]
     }
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump(safe, f, indent=4)
-    except Exception as e:
-        print(f"Error saving state: {e}")
-
-
-# ======================================================
-#           PRICE PROVIDER (BYBIT)
-# ======================================================
-def fetch_price(asset: Asset):
-    """
-    Fetches the latest price from the Bybit V5 Market Tickers API.
-    Uses the 'linear' category for USDT perpetuals.
-    """
-    try:
-        # Request parameters for a specific symbol in the linear/perpetual market
-        params = {
-            "category": "linear",
-            "symbol": asset.symbol
-        }
-        
-        r = requests.get(BYBIT_URL, params=params, timeout=6)
-        r.raise_for_status() # Raises an HTTPError for bad responses (4xx or 5xx)
-
-        data = r.json()
-
-        # Check for Bybit API specific error codes
-        if data.get("retCode") != 0:
-            # Note: This print statement should handle the 429 error if Bybit is the source
-            print(f"Bybit API Error ({data.get('retCode')}): {data.get('retMsg')}")
-            return None
-
-        # Navigate the response structure: result -> list[0] -> lastPrice
-        ticker_list = data.get("result", {}).get("list", [])
-        if not ticker_list:
-            return None
-
-        last_price_str = ticker_list[0].get("lastPrice")
-        if last_price_str is not None:
-            return float(last_price_str)
-
-    except requests.exceptions.RequestException as e:
-        # Handles connection errors, timeouts, and HTTP errors
-        print(f"Error fetching price from Bybit: {e}")
-    except (ValueError, TypeError) as e:
-        # Handles errors in data conversion (e.g., float conversion)
-        print(f"Error parsing price data: {e}")
-
-    return None
-
-
-# ======================================================
-#             POLLER THREAD
-# ======================================================
-def price_poller(asset: Asset, q, stop_event):
-    """Thread function to continuously poll the price."""
-    while not stop_event.is_set():
-        price = fetch_price(asset)
-        if price is not None:
-            ts = datetime.now().strftime("%H:%M:%S")
-            q.put((ts, price))
-        time.sleep(POLL_INTERVAL)
+    with open(STATE_FILE, "w") as f:
+        json.dump(safe, f, indent=4)
 
 
 # ======================================================
@@ -148,9 +120,6 @@ def price_poller(asset: Asset, q, stop_event):
 # ======================================================
 if "state" not in st.session_state:
     saved = load_state()
-    default_symbol = "btcusdt"
-    default_asset = ASSETS[default_symbol]
-
     if saved:
         st.session_state.state = {
             **saved,
@@ -166,7 +135,7 @@ if "state" not in st.session_state:
             "balance": 10000.0, "shares": 0.0,
             "avg_entry": 0.0, "trades": [],
             "active": False, "current_price": 0.0,
-            "symbol": default_symbol, "symbol_name": default_asset.name
+            "symbol": "btcusdt", "symbol_name": ASSETS["btcusdt"].name
         }
 
 if "price_queue" not in st.session_state:
@@ -177,7 +146,6 @@ if "stop_event" not in st.session_state:
 
 if "poll_thread" not in st.session_state:
     st.session_state.poll_thread = None
-
 
 state = st.session_state.state
 
@@ -193,22 +161,20 @@ symbol = st.sidebar.selectbox(
     format_func=lambda x: ASSETS[x].name
 )
 
-# Get the current Asset object using the selected symbol key
 current_asset = ASSETS[symbol]
 
-# Asset change logic
+# Asset change
 if symbol != state["symbol"]:
     state["symbol"] = symbol
     state["symbol_name"] = current_asset.name
     state["prices"], state["times"], state["sma"] = [], [], []
     state["current_price"] = 0.0
 
-    # Stop the existing thread if an asset change occurs
     st.session_state.stop_event.set()
     st.session_state.stop_event = threading.Event()
     st.session_state.poll_thread = None
 
-# Strategy parameters
+# Strategy params
 SMA_PERIOD = st.sidebar.slider("SMA Period", 5, 50, 20, 5)
 BUY_DIP = st.sidebar.number_input("Buy Below SMA (%)", 0.01, 5.0, 0.5) / 100
 TP = st.sidebar.number_input("Take Profit (%)", 0.1, 5.0, 1.0) / 100
@@ -217,7 +183,6 @@ INVEST_PCT = st.sidebar.slider("Invest %", 10, 100, 90) / 100
 
 # Reset
 def reset_all():
-    """Resets the state and removes the history file."""
     if os.path.exists(STATE_FILE):
         os.remove(STATE_FILE)
     st.session_state.state = {
@@ -235,7 +200,6 @@ if st.sidebar.button("Start Bot" if not state["active"] else "Stop Bot"):
     state["active"] = not state["active"]
 
     if state["active"]:
-        # Start polling thread
         st.session_state.stop_event.clear()
         t = threading.Thread(
             target=price_poller,
@@ -245,12 +209,11 @@ if st.sidebar.button("Start Bot" if not state["active"] else "Stop Bot"):
         t.start()
         st.session_state.poll_thread = t
     else:
-        # Stop polling thread
         st.session_state.stop_event.set()
 
 
 # ======================================================
-#         PROCESS PRICE QUEUE & TRADING LOGIC
+#         PROCESS PRICE QUEUE
 # ======================================================
 while not st.session_state.price_queue.empty():
     ts, price = st.session_state.price_queue.get()
@@ -259,24 +222,22 @@ while not st.session_state.price_queue.empty():
     state["prices"].append(price)
     state["times"].append(ts)
 
-    # Maintain a clean history of the last 100 points
     if len(state["prices"]) > 100:
         state["prices"].pop(0)
         state["times"].pop(0)
         if state["sma"]:
             state["sma"].pop(0)
 
-    # Calculate Simple Moving Average (SMA)
     if len(state["prices"]) >= SMA_PERIOD:
         state["sma"].append(np.mean(state["prices"][-SMA_PERIOD:]))
     else:
         state["sma"].append(None)
 
-    # Trading Logic
+    # Trading
     if state["active"] and state["sma"][-1] is not None:
         sma = state["sma"][-1]
 
-        # BUY Signal: Price is below SMA by the BUY_DIP percentage
+        # BUY
         if state["shares"] == 0 and price < sma * (1 - BUY_DIP):
             invest = state["balance"] * INVEST_PCT
             if invest > 0:
@@ -288,32 +249,19 @@ while not st.session_state.price_queue.empty():
                     "price": price, "amount": state["shares"], "pnl": 0
                 })
                 save_state(state)
-                print(f"TRADE: BUY {state['shares']:.4f} @ {price:.4f}")
 
-        # SELL Signal: Shares are held and Take Profit or Stop Loss is hit
+        # SELL
         elif state["shares"] > 0:
             pct = (price - state["avg_entry"]) / state["avg_entry"]
-            
-            # Check for Take Profit (TP) or Stop Loss (SL)
-            if pct >= TP:
-                trade_type = "SELL (TP)"
-                is_sell = True
-            elif pct <= -SL:
-                trade_type = "SELL (SL)"
-                is_sell = True
-            else:
-                is_sell = False
-            
-            if is_sell:
+            if pct > TP or pct < -SL:
                 revenue = state["shares"] * price
                 pnl = revenue - (state["shares"] * state["avg_entry"])
 
                 state["balance"] += revenue
                 state["trades"].insert(0, {
-                    "time": ts, "type": trade_type,
+                    "time": ts, "type": "SELL",
                     "price": price, "amount": state["shares"], "pnl": pnl
                 })
-                print(f"TRADE: {trade_type} {state['shares']:.4f} @ {price:.4f} | PNL: {pnl:.2f}")
 
                 state["shares"] = 0
                 state["avg_entry"] = 0
@@ -325,18 +273,12 @@ while not st.session_state.price_queue.empty():
 # ======================================================
 if len(state["times"]) > 0:
     last_ts = state["times"][-1]
-    # Handle the case where the Streamlit rerun happens slightly after the thread updates the time
-    try:
-        last_dt = datetime.strptime(last_ts, "%H:%M:%S")
-        # Check if the delay is slightly longer than the new 15-second interval
-        delay = (datetime.now() - last_dt).total_seconds()
-    except ValueError:
-        delay = POLL_INTERVAL * 2 # Assume slow if parsing fails temporarily
+    last_dt = datetime.strptime(last_ts, "%H:%M:%S")
+    delay = (datetime.now() - last_dt).total_seconds()
 
-    # Updated connection status logic to account for the longer POLL_INTERVAL
-    if delay < POLL_INTERVAL + 5: # Give 5 extra seconds tolerance
+    if delay < POLL_INTERVAL + 3:
         conn = "🟢 Live"
-    elif delay < 60:
+    elif delay < 20:
         conn = "🟡 Slow"
     else:
         conn = "🔴 Disconnected"
@@ -349,47 +291,16 @@ else:
 # ======================================================
 st.title(f"{state['symbol_name']} Algo Trader")
 st.markdown(f"### Connection Status: {conn}")
-st.caption(f"Provider: **{PROVIDER_NAME}**")
+st.caption("Provider: **Bybit**")
 
-# Calculate metrics for display
 equity = state["balance"] + state["shares"] * state["current_price"]
 profit = equity - 10000
 
-# Calculate unrealized PNL (only if holding shares)
-unrealized_pnl = 0
-pnl_delta_value = None
-pnl_color_mode = "off"
-
-if state["shares"] > 0 and state["avg_entry"] > 0:
-    unrealized_pnl = state["shares"] * (state["current_price"] - state["avg_entry"])
-    
-    # FIX 1 (from previous response): Provide the numerical PNL as the delta argument.
-    pnl_delta_value = unrealized_pnl
-
-    # Streamlit requires one of its keywords for delta_color
-    pnl_color_mode = "normal" 
-
-    # Removed the unnecessary pnl_color and pnl_sign variables here.
-    
-else:
-    # If no shares, PNL is 0. Set delta to None to hide the arrow/delta text in the metric.
-    pnl_color_mode = "off" 
-    pnl_delta_value = None
-
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric(f"{current_asset.symbol} Price", f"${state['current_price']:.4f}")
-col2.metric("Cash Balance", f"${state['balance']:.2f}")
-col3.metric("Shares Held", f"{state['shares']:.4f}")
-
-# FIX 2 (from previous response): Corrected st.metric call 
-col4.metric(
-    "Unrealized PNL", 
-    f"${unrealized_pnl:.2f}", # Display the PNL value itself.
-    delta=pnl_delta_value,    # <--- CRITICAL FIX: Pass the numerical value as delta
-    delta_color=pnl_color_mode # Pass the Streamlit keyword
-)
-
-col5.metric("Total Equity", f"${equity:.2f}")
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Price", f"${state['current_price']:.4f}")
+col2.metric("Balance", f"${state['balance']:.2f}")
+col3.metric("Equity", f"${equity:.2f}")
+col4.metric("Profit", f"${profit:.2f}")
 
 # Chart
 if len(state["prices"]) > 0:
@@ -397,10 +308,9 @@ if len(state["prices"]) > 0:
 
     fig.add_trace(go.Scatter(
         x=state["times"], y=state["prices"],
-        mode="lines", name="Price", line=dict(color="#10b981") # Tailwind emerald-500
+        mode="lines", name="Price", line=dict(color="lime")
     ))
 
-    # Add SMA line, only for points where SMA is calculated
     sma_clean = [(state["times"][i], state["sma"][i])
                  for i in range(len(state["sma"]))
                  if state["sma"][i] is not None]
@@ -411,66 +321,31 @@ if len(state["prices"]) > 0:
             y=[t[1] for t in sma_clean],
             mode="lines",
             name=f"SMA {SMA_PERIOD}",
-            line=dict(color="#fcd34d", dash="dash") # Tailwind amber-300
+            line=dict(color="gold", dash="dash")
         ))
-        
-        # Add entry price line if holding shares
-        if state["shares"] > 0 and state["avg_entry"] > 0:
-             fig.add_hline(
-                y=state["avg_entry"], 
-                line_dash="dot", 
-                annotation_text="Avg Entry", 
-                annotation_position="top left",
-                line_color="#3b82f6" # Tailwind blue-500
-            )
-
 
     fig.update_layout(
-        height=450,
-        margin=dict(l=15, r=15, t=30, b=10),
-        # Use a dark, modern theme for the plot
-        template="plotly_dark",
-        paper_bgcolor="#1f2937", # Tailwind gray-800
-        plot_bgcolor="#1f2937",
-        font=dict(color="#f9fafb") # Tailwind gray-50
+        height=420,
+        margin=dict(l=15, r=15, t=10, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="white")
     )
 
     st.plotly_chart(fig, use_container_width=True)
 else:
-    st.warning("Waiting for price data from Bybit…")
+    st.warning("Waiting for price data…")
 
 # Trade Log
-st.subheader("Trade History")
+st.subheader("Trades")
 if state["trades"]:
     df = pd.DataFrame(state["trades"])
-    
-    # Calculate cumulative PNL
-    df['cumulative_pnl'] = df['pnl'].cumsum()
-    
-    # Format columns for display
     df["price"] = df["price"].apply(lambda x: f"${x:.4f}")
-    df["amount"] = df["amount"].apply(lambda x: f"{x:.4f}")
     df["pnl"] = df["pnl"].apply(lambda x: f"${x:.4f}")
-    df["cumulative_pnl"] = df["cumulative_pnl"].apply(lambda x: f"${x:.2f}")
-
-    # Style PNL column
-    def color_pnl(val):
-        """Colors PNL cells green/red."""
-        try:
-            val_float = float(val.replace('$', ''))
-            color = 'green' if val_float >= 0 else 'red'
-            return f'color: {color}'
-        except:
-            return ''
-
-    st.dataframe(
-        df.style.applymap(color_pnl, subset=['pnl', 'cumulative_pnl']),
-        hide_index=True, 
-        use_container_width=True
-    )
+    st.dataframe(df, hide_index=True, use_container_width=True)
 else:
-    st.info("No trades have been executed yet.")
+    st.info("No trades yet.")
 
-# Auto-refresh mechanism
+# Auto-refresh
 time.sleep(1)
 st.rerun()
