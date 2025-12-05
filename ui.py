@@ -378,7 +378,7 @@ def render_bot_page(state, config, ASSETS, current_asset, start_bot, stop_bot, r
 # ===========================================================
 # MAIN APP SHELL
 # ===========================================================
-# FIX: The function signature must accept all 12 arguments passed from main.py
+# CRUCIAL FIX: Ensure this function signature matches the call in main.py
 def render_app_shell(page, state, config, ASSETS, current_asset, connection_label, equity, profit, start_bot, stop_bot, reset_state, poll_interval): 
     # Render main content
     render_header(state["symbol_name"], connection_label)
