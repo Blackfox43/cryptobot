@@ -2,7 +2,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import numpy as np
 import pandas as pd
-import time # <-- FIX: Import missing module
+import time 
 
 # ===========================================================
 # THEME ENGINE (MOBILE FIRST)
@@ -277,7 +277,7 @@ def render_trades_page(state):
 # ===========================================================
 # BOT/SETTINGS PAGE
 # ===========================================================
-def render_bot_page(state, config, ASSETS, current_asset, start_bot, stop_bot, reset_state):
+def render_bot_page(state, config, ASSETS, current_asset, start_bot, stop_bot, reset_state, poll_interval): # <-- FIX: Accept poll_interval
     st.subheader("Asset & Strategy Configuration")
     
     # ------------------ Asset Selection ------------------
@@ -352,7 +352,8 @@ def render_bot_page(state, config, ASSETS, current_asset, start_bot, stop_bot, r
         st.session_state.config["SL"] = new_sl
         
         st.markdown("---")
-        st.caption(f"Price Polling Interval: **{st.session_state.bot_core.POLL_INTERVAL} seconds**") # Accessing the constant via st.session_state's module
+        # FIX: Use the passed poll_interval variable
+        st.caption(f"Price Polling Interval: **{poll_interval} seconds**") 
 
     st.divider()
 
@@ -377,7 +378,7 @@ def render_bot_page(state, config, ASSETS, current_asset, start_bot, stop_bot, r
 # ===========================================================
 # MAIN APP SHELL
 # ===========================================================
-def render_app_shell(page, state, config, ASSETS, current_asset, connection_label, equity, profit, start_bot, stop_bot, reset_state):
+def render_app_shell(page, state, config, ASSETS, current_asset, connection_label, equity, profit, start_bot, stop_bot, reset_state, poll_interval): # <-- FIX: Accept poll_interval
     # Render main content
     render_header(state["symbol_name"], connection_label)
 
@@ -392,7 +393,8 @@ def render_app_shell(page, state, config, ASSETS, current_asset, connection_labe
         elif page == "trades":
             render_trades_page(state)
         elif page == "bot":
-            render_bot_page(state, config, ASSETS, current_asset, start_bot, stop_bot, reset_state)
+            # FIX: Pass poll_interval to the bot page renderer
+            render_bot_page(state, config, ASSETS, current_asset, start_bot, stop_bot, reset_state, poll_interval) 
             
     # Render persistent bottom navigation
     render_bottom_nav(page)
