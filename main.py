@@ -1,5 +1,5 @@
 import streamlit as st
-import time # Time is still needed here for st.rerun if desired, but we'll remove explicit sleep.
+import time
 from ui import render_app_shell, set_mobile_theme, get_active_page
 from bot_core import (
     init_session_state,
@@ -9,7 +9,8 @@ from bot_core import (
     get_equity_and_profit,
     get_connection_status,
     reset_state,
-    get_asset_config_and_current_asset # New import
+    get_asset_config_and_current_asset,
+    POLL_INTERVAL # <-- FIX: Import the constant directly
 )
 
 # ------------------------------------------------------
@@ -78,16 +79,16 @@ def reset_state_wrapper():
 render_app_shell(
     page=page,
     state=state,
-    config=config, # Pass config to UI
-    ASSETS=ASSETS, # Pass Asset list to UI
-    current_asset=current_asset, # Pass current asset to UI
+    config=config,
+    ASSETS=ASSETS,
+    current_asset=current_asset,
     connection_label=connection_label,
     equity=equity,
     profit=profit,
-    # Pass wrappers to the UI functions
     start_bot=start_bot_wrapper,
     stop_bot=stop_bot_wrapper,
-    reset_state=reset_state_wrapper
+    reset_state=reset_state_wrapper,
+    poll_interval=POLL_INTERVAL # <-- FIX: Pass the constant here
 )
 
 # ------------------------------------------------------
