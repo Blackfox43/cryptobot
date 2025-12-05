@@ -277,7 +277,7 @@ def render_trades_page(state):
 # ===========================================================
 # BOT/SETTINGS PAGE
 # ===========================================================
-def render_bot_page(state, config, ASSETS, current_asset, start_bot, stop_bot, reset_state, poll_interval): # <-- FIX: Accept poll_interval
+def render_bot_page(state, config, ASSETS, current_asset, start_bot, stop_bot, reset_state, poll_interval): 
     st.subheader("Asset & Strategy Configuration")
     
     # ------------------ Asset Selection ------------------
@@ -352,7 +352,7 @@ def render_bot_page(state, config, ASSETS, current_asset, start_bot, stop_bot, r
         st.session_state.config["SL"] = new_sl
         
         st.markdown("---")
-        # FIX: Use the passed poll_interval variable
+        # Use the passed poll_interval variable
         st.caption(f"Price Polling Interval: **{poll_interval} seconds**") 
 
     st.divider()
@@ -378,7 +378,8 @@ def render_bot_page(state, config, ASSETS, current_asset, start_bot, stop_bot, r
 # ===========================================================
 # MAIN APP SHELL
 # ===========================================================
-def render_app_shell(page, state, config, ASSETS, current_asset, connection_label, equity, profit, start_bot, stop_bot, reset_state, poll_interval): # <-- FIX: Accept poll_interval
+# IMPORTANT FIX: Ensure this function signature accepts all arguments passed in main.py
+def render_app_shell(page, state, config, ASSETS, current_asset, connection_label, equity, profit, start_bot, stop_bot, reset_state, poll_interval): 
     # Render main content
     render_header(state["symbol_name"], connection_label)
 
@@ -393,7 +394,7 @@ def render_app_shell(page, state, config, ASSETS, current_asset, connection_labe
         elif page == "trades":
             render_trades_page(state)
         elif page == "bot":
-            # FIX: Pass poll_interval to the bot page renderer
+            # Pass poll_interval to the bot page renderer
             render_bot_page(state, config, ASSETS, current_asset, start_bot, stop_bot, reset_state, poll_interval) 
             
     # Render persistent bottom navigation
