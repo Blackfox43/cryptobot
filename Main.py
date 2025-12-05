@@ -10,7 +10,7 @@ from bot_core import (
     get_connection_status,
     reset_state,
     get_asset_config_and_current_asset,
-    POLL_INTERVAL # <-- FIX: Import the constant directly
+    POLL_INTERVAL # Correctly imported
 )
 
 # ------------------------------------------------------
@@ -62,7 +62,6 @@ ASSETS, current_asset = get_asset_config_and_current_asset(st.session_state)
 
 # ------------------------------------------------------
 # WRAPPED BOT CONTROLS FOR UI
-# These functions wrap the core functions to pass st.session_state implicitly
 # ------------------------------------------------------
 def start_bot_wrapper():
     start_bot(st.session_state)
@@ -76,6 +75,7 @@ def reset_state_wrapper():
 # ------------------------------------------------------
 # UI RENDERING
 # ------------------------------------------------------
+# Ensure all 12 arguments are passed to render_app_shell
 render_app_shell(
     page=page,
     state=state,
@@ -88,11 +88,10 @@ render_app_shell(
     start_bot=start_bot_wrapper,
     stop_bot=stop_bot_wrapper,
     reset_state=reset_state_wrapper,
-    poll_interval=POLL_INTERVAL # <-- FIX: Pass the constant here
+    poll_interval=POLL_INTERVAL 
 )
 
 # ------------------------------------------------------
 # AUTO-REFRESH
 # ------------------------------------------------------
-# Removed time.sleep(1) to speed up responsiveness.
 st.rerun()
