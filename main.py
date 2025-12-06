@@ -64,10 +64,10 @@ render_main_layout(
     connection_label="multi",
     equity=total_equity,
     profit=total_profit,
-    start_multi=lambda s, keys=st.session_state.strategy.get("multi_assets",[]): start_multi(st.session_state, keys),
+    start_multi=lambda s, keys=st.session_state.strategy.get("multi_assets", []): start_multi(st.session_state, keys),
     stop_multi=lambda s=None: stop_multi(st.session_state),
     persist_and_reset=lambda s=st.session_state: persist_all(st.session_state),
 )
 
-# safe auto-refresh
-st.experimental_set_query_params(_ts=int(time.time()))
+# SAFE AUTO-REFRESH (Python 3.11 compatible)
+st.query_params["_ts"] = int(time.time())
