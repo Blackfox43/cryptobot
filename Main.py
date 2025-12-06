@@ -1,4 +1,3 @@
-# Main.py
 import time
 import streamlit as st
 from ui import render_app_shell, set_mobile_theme, get_active_page
@@ -15,44 +14,39 @@ from bot_core import (
 )
 
 # ------------------------------------------------------
-# APP CONFIG
+# PAGE CONFIG
 # ------------------------------------------------------
 st.set_page_config(page_title="Algo Trader", layout="wide", initial_sidebar_state="collapsed")
 
 # ------------------------------------------------------
-# INITIALIZE SESSION STATE (explicit)
+# INIT SESSION
 # ------------------------------------------------------
-# Pass streamlit's session_state to the initializer
 init_session_state(st.session_state)
 
 state = st.session_state.state
 config = st.session_state.config
 
 # ------------------------------------------------------
-# APPLY THEME + MOBILE ADAPTATION
+# UI THEME
 # ------------------------------------------------------
 set_mobile_theme()
 
 # ------------------------------------------------------
-# ROUTER — bottom navigation decides which page is active
+# CURRENT PAGE
 # ------------------------------------------------------
 page = get_active_page()
 
 # ------------------------------------------------------
-# BACKGROUND ENGINE — price queue processor
+# CORE ENGINE UPDATES
 # ------------------------------------------------------
-# We process any queued price updates (safe to call every run)
 process_price_updates(st.session_state)
 
-# ------------------------------------------------------
-# CONNECTION STATUS & METRICS (read-only helpers)
-# ------------------------------------------------------
 connection_label = get_connection_status(st.session_state)
 equity, profit = get_equity_and_profit(st.session_state)
 ASSETS, current_asset = get_asset_config_and_current_asset(st.session_state)
 
 # ------------------------------------------------------
-# WRAPPED BOT CONTROLS FOR UI (these call into bot_core with session_state)
+# BOT CONTROL WRAPPERS
 # ------------------------------------------------------
 def start_bot_wrapper():
     start_bot(st.session_state)
@@ -64,9 +58,8 @@ def reset_state_wrapper():
     reset_state(st.session_state)
 
 # ------------------------------------------------------
-# UI RENDERING
+# UI RENDER
 # ------------------------------------------------------
-# This call expects the ui.render_app_shell signature used in your repo.
 render_app_shell(
     page=page,
     state=state,
@@ -83,21 +76,13 @@ render_app_shell(
 )
 
 # ------------------------------------------------------
-# SAFE AUTO-REFRESH (no query params, compatible across Streamlit versions)
-# We store a timestamp in session_state and only call rerun after poll interval
+# SAFE REFRESH LOOP
 # ------------------------------------------------------
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = time.time()
 
-# Convert POLL_INTERVAL to a float/sane fallback
-try:
-    _poll = float(POLL_INTERVAL)
-except Exception:
-    _poll = 5.0
+interval = float(POLL_INTERVAL)
 
-now = time.time()
-if now - st.session_state.last_refresh >= _poll:
-    # update timestamp first to avoid immediate rerun loops
-    st.session_state.last_refresh = now
-    # trigger a safe rerun to pick up new data and UI changes
+if time.time() - st.session_state.last_refresh >= interval:
+    st.session_state.last_refresh = time.time()
     st.experimental_rerun()
