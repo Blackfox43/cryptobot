@@ -85,4 +85,4 @@ interval = float(POLL_INTERVAL)
 
 if time.time() - st.session_state.last_refresh >= interval:
     st.session_state.last_refresh = time.time()
-    st.experimental_rerun()
+    st.rerun()
