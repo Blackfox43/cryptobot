@@ -48,13 +48,13 @@ ASSETS, current_asset = get_asset_config_and_current_asset(st.session_state)
 # ------------------------------------------------------
 # BOT CONTROL WRAPPERS
 # ------------------------------------------------------
-def start_bot_wrapper():
+def start_bot_wrapper(_=None):
     start_bot(st.session_state)
 
-def stop_bot_wrapper():
+def stop_bot_wrapper(_=None):
     stop_bot(st.session_state)
 
-def reset_state_wrapper():
+def reset_state_wrapper(_=None):
     reset_state(st.session_state)
 
 # ------------------------------------------------------
