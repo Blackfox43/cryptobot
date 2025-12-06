@@ -1,124 +1,163 @@
-# ui.py (mobile-friendly UI, no pandas)
+# ui.py
+"""
+Professional UI — sidebar navigation, multi-asset controls, indicators panel, charts and trade logs.
+"""
+
 import streamlit as st
 import plotly.graph_objects as go
+import pandas as pd
 
 def set_mobile_theme():
     if "current_page" not in st.session_state:
-        st.session_state.current_page = "home"
+        st.session_state.current_page = "dashboard"
     st.markdown(
         """
-    <style>
-      .stApp { background-color: #0d0f12 !important; color: white !important; }
-      div[data-testid="metric-container"]{ background:#15181d; border-radius:12px; padding:10px; }
-      .app-header{ padding:8px 0; text-align:center; color:#f0f0f0; border-bottom:1px solid #222; margin-bottom:8px;}
-      .app-header h1{ margin:0; font-size:1.4rem;}
-      .app-header span{ font-size:0.8rem; color:#aaa;}
-      .block-container{ padding-bottom:90px !important; } /* room for bottom nav */
-      .bottom-buttons { position: fixed; left: 0; bottom: 0; width: 100%; background:#0b0d10; padding:6px 8px; border-top:1px solid #222; z-index:9999; display:flex; gap:6px; justify-content:space-around; }
-      .nav-btn{ color:#bfc9d9; font-weight:600; }
-    </style>
-    """,
+        <style>
+          .stApp { background-color: #071227; color: #e6eef8; }
+          .block-container { padding: 1rem 1.5rem 5.5rem 1.5rem; }
+          .sidebar .sidebar-content { background: linear-gradient(180deg,#041021,#071227); }
+          .header-title { font-size: 1.4rem; font-weight:700; margin:0; color:#e6eef8; }
+          .header-sub { color:#9fb0c8; font-size:0.85rem; }
+          footer { visibility:hidden; }
+        </style>
+        """,
         unsafe_allow_html=True,
     )
 
 def get_active_page():
-    return st.session_state.get("current_page", "home")
+    return st.session_state.get("current_page", "dashboard")
 
-def set_active_page(page_name):
-    st.session_state.current_page = page_name
+def set_active_page(page):
+    st.session_state.current_page = page
 
-def render_header(symbol_name, connection_label):
-    st.markdown(f'<div class="app-header"><h1>Algo Trader</h1><span>{symbol_name} · {connection_label}</span></div>', unsafe_allow_html=True)
+# Header
+def render_header(symbol_name, connection_label, equity, profit):
+    col1, col2 = st.columns([3, 1], gap="large")
+    with col1:
+        st.markdown(f"<div style='font-weight:700;font-size:1.2rem'>{symbol_name} · {connection_label}</div>", unsafe_allow_html=True)
+    with col2:
+        st.metric("Equity", f"${equity:,.2f}", delta=f"${profit:,.2f}")
 
-def render_bottom_nav(active_page):
-    cols = st.columns(4)
-    labels = [("home","Metrics"), ("chart","Chart"), ("trades","Trades"), ("bot","Bot")]
-    for i, (key, label) in enumerate(labels):
-        with cols[i]:
-            clicked = st.button(label, key=f"nav_{key}")
-            if clicked:
-                set_active_page(key)
+# Sidebar
+def render_sidebar_ui(ASSETS, st_state, start_multi, stop_multi, persist_and_reset):
+    st.sidebar.title("Controls")
+    st.sidebar.markdown("### Asset Selection")
+    keys = list(ASSETS.keys())
+    # Multi-select
+    multi_selected = st.sidebar.multiselect("Monitor assets (multi-select)", keys, default=st_state.strategy.get("multi_assets", [list(ASSETS.keys())[0]]), format_func=lambda k: ASSETS[k].name)
+    st_state.strategy["multi_assets"] = multi_selected
 
-def render_home_page(state, config, ASSETS, current_asset, equity, profit):
-    st.subheader(f"{current_asset.name} Price & Equity")
-    unrealized = 0.0
-    if state.get("shares", 0) > 0 and state.get("avg_entry", 0) > 0:
-        unrealized = state["shares"] * (state["current_price"] - state["avg_entry"])
-    col1, col2 = st.columns(2)
-    col1.metric("Price", f"${state['current_price']:.4f}")
-    col2.metric("Equity", f"${equity:.2f}")
-    col3, col4 = st.columns(2)
-    col3.metric("Balance", f"${state['balance']:.2f}")
-    col4.metric("Unrealized PNL", f"${unrealized:.2f}")
-    st.caption(f"Source: **{state.get('provider','---')}**")
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Strategy Mode")
+    mode = st.sidebar.selectbox("Mode", ["sma_dip", "sma_crossover", "rsi", "macd", "combo"], index=["sma_dip","sma_crossover","rsi","macd","combo"].index(st_state.strategy.get("mode","sma_dip")))
+    st_state.strategy["mode"] = mode
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Indicators / Params")
+    st_state.strategy["SMA_PERIOD"] = st.sidebar.slider("SMA period", 5, 100, int(st_state.strategy.get("SMA_PERIOD",20)))
+    st_state.strategy["BUY_DIP"] = float(st.sidebar.number_input("Buy dip (%)", 0.01, 10.0, float(st_state.strategy.get("BUY_DIP",0.5))*100)/100.0)
+    st_state.strategy["SMA_SHORT"] = st.sidebar.slider("SMA short (crossover)", 3, 50, int(st_state.strategy.get("SMA_SHORT",5)))
+    st_state.strategy["SMA_LONG"] = st.sidebar.slider("SMA long (crossover)", 5, 200, int(st_state.strategy.get("SMA_LONG",20)))
+    st_state.strategy["RSI_PERIOD"] = st.sidebar.number_input("RSI period", 7, 30, int(st_state.strategy.get("RSI_PERIOD",14)))
+    st_state.strategy["RSI_BUY"] = st.sidebar.number_input("RSI buy threshold", 5, 50, int(st_state.strategy.get("RSI_BUY",30)))
+    st_state.strategy["RSI_SELL"] = st.sidebar.number_input("RSI sell threshold", 50, 95, int(st_state.strategy.get("RSI_SELL",70)))
+    st_state.strategy["MACD_FAST"] = st.sidebar.number_input("MACD fast", 6, 26, int(st_state.strategy.get("MACD_FAST",12)))
+    st_state.strategy["MACD_SLOW"] = st.sidebar.number_input("MACD slow", 13, 52, int(st_state.strategy.get("MACD_SLOW",26)))
+    st_state.strategy["MACD_SIGNAL"] = st.sidebar.number_input("MACD signal", 6, 20, int(st_state.strategy.get("MACD_SIGNAL",9)))
+    st_state.strategy["TP"] = float(st.sidebar.number_input("Take profit (%)", 0.01, 50.0, float(st_state.strategy.get("TP",1.0)))/100.0)
+    st_state.strategy["SL"] = float(st.sidebar.number_input("Stop loss (%)", 0.01, 50.0, float(st_state.strategy.get("SL",2.0)))/100.0)
+    st_state.strategy["INVEST_PCT"] = float(st.sidebar.slider("Invest %", 1, 100, int(st_state.strategy.get("INVEST_PCT",0.9)*100))/100.0)
+    st_state.strategy["telegram_alerts"] = st.sidebar.checkbox("Telegram alerts", value=st_state.strategy.get("telegram_alerts", False))
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Bot Control")
+    if st.sidebar.button("Start Monitoring Selected"):
+        start_multi(st_state, multi_selected)
+    if st.sidebar.button("Stop Monitoring All"):
+        stop_multi(st_state)
+    if st.sidebar.button("Save & Reset balances (persist)"):
+        persist_and_reset(st_state)
+    st.sidebar.caption("Pro UI — Multi-asset & indicators")
+
+# Small asset cards
+def render_asset_cards(st_state, ASSETS):
+    cols = st.columns(3)
+    keys = st_state.strategy.get("multi_assets", [])
+    if not keys:
+        st.info("No assets selected — pick assets in the sidebar to monitor them.")
+        return
+    for i, k in enumerate(keys):
+        if i % 3 == 0:
+            cols = st.columns(3)
+        s = st_state.multi_state.get(k, {})
+        col = cols[i % 3]
+        col.markdown(f"#### {ASSETS[k].name}")
+        price = s.get("current_price", 0.0)
+        bal = s.get("balance", 0.0)
+        shares = s.get("shares", 0.0)
+        col.metric("Price", f"${price:.4f}")
+        col.metric("Balance", f"${bal:.2f}")
+        col.metric("Holdings", f"{shares:.6f}")
+
+# Pages
+def render_dashboard_page(st_state, ASSETS, connection_label, equity, profit):
+    render_header("Multi Asset Dashboard", connection_label, equity, profit)
+    render_asset_cards(st_state, ASSETS)
     st.divider()
-    st.subheader("Recent trades")
-    if state.get("trades"):
-        st.table(state["trades"][:10])
+    st.markdown("### Recent Trades Across Assets")
+    rows = []
+    for k, s in st_state.multi_state.items():
+        for t in s.get("trades", [])[:5]:
+            rows.append({"asset": s.get("symbol_name"), **t})
+    if rows:
+        df = pd.DataFrame(rows)
+        st.table(df.head(20))
     else:
-        st.info("No trades yet.")
+        st.info("No trades recorded yet.")
 
-def render_chart_page(state, config, current_asset):
-    st.subheader(f"{current_asset.bybit_symbol} Chart")
-    if not state.get("prices"):
+def render_asset_detail_page(st_state, asset_key):
+    s = st_state.multi_state.get(asset_key, {})
+    render_header(s.get("symbol_name",""), s.get("provider","---"), s.get("balance",0), s.get("balance",0)-INITIAL_BALANCE)
+    st.markdown("### Live Chart")
+    if not s.get("prices"):
         st.info("Waiting for price data...")
         return
+    import plotly.graph_objects as go
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=state["times"], y=state["prices"], mode="lines", name="Price"))
-    sma = state.get("sma", [])
-    sma_points = [(state["times"][i], sma[i]) for i in range(len(sma)) if sma[i] is not None]
-    if sma_points:
-        fig.add_trace(go.Scatter(x=[p[0] for p in sma_points], y=[p[1] for p in sma_points], mode="lines", name=f"SMA {config['SMA_PERIOD']}", line=dict(dash="dash")))
-    fig.update_layout(template="plotly_dark", height=420, margin=dict(l=8,r=8,t=8,b=8))
+    fig.add_trace(go.Scatter(x=s["times"], y=s["prices"], mode="lines", name="Price"))
+    if s.get("sma"):
+        points = [(s["times"][i], s["sma"][i]) for i in range(len(s["sma"])) if s["sma"][i] is not None]
+        if points:
+            fig.add_trace(go.Scatter(x=[p[0] for p in points], y=[p[1] for p in points], mode="lines", name="SMA"))
+    fig.update_layout(template="plotly_dark", height=420)
     st.plotly_chart(fig, use_container_width=True)
-
-def render_trades_page(state):
-    st.subheader("Trades")
-    if not state.get("trades"):
-        st.info("No trades yet.")
-        return
-    st.table(state["trades"])
-
-def render_bot_page(state, config, ASSETS, current_asset, start_bot, stop_bot, reset_state, poll_interval):
-    st.subheader("Bot & Strategy")
-    cols = st.columns([3,1])
-    with cols[0]:
-        keys = list(ASSETS.keys())
-        idx = keys.index(state.get("symbol","btcusdt"))
-        sel = st.selectbox("Asset", keys, index=idx, format_func=lambda k: ASSETS[k].name, key="asset_select")
-        if sel != state.get("symbol"):
-            st.session_state.state["symbol"] = sel
-            st.session_state.state["symbol_name"] = ASSETS[sel].name
-    with cols[1]:
-        if st.button("Reset", use_container_width=True):
-            reset_state()
     st.divider()
-    st.subheader("Strategy Parameters")
-    sma = st.slider("SMA Period", 5, 50, config["SMA_PERIOD"], key="ui_sma")
-    st.session_state.config["SMA_PERIOD"] = sma
-    invest = st.slider("Invest %", 10, 100, int(config["INVEST_PCT"]*100), key="ui_invest")
-    st.session_state.config["INVEST_PCT"] = invest/100.0
-    st.caption(f"Polling interval: {poll_interval} s")
-    st.divider()
-    status = "Running" if state.get("active") else "Stopped"
-    st.write(f"**Status:** {status}")
-    if not state.get("active"):
-        if st.button("Start Bot"):
-            start_bot()
+    st.markdown("### Trades")
+    if s.get("trades"):
+        df = pd.DataFrame(s["trades"])
+        st.dataframe(df, use_container_width=True)
     else:
-        if st.button("Stop Bot"):
-            stop_bot()
+        st.info("No trades for this asset.")
 
-def render_app_shell(page, state, config, ASSETS, current_asset, connection_label, equity, profit, start_bot, stop_bot, reset_state, poll_interval):
-    render_header(state.get("symbol_name",""), connection_label)
-    if page == "home":
-        render_home_page(state, config, ASSETS, current_asset, equity, profit)
-    elif page == "chart":
-        render_chart_page(state, config, current_asset)
-    elif page == "trades":
-        render_trades_page(state)
-    elif page == "bot":
-        render_bot_page(state, config, ASSETS, current_asset, start_bot, stop_bot, reset_state, poll_interval)
-    # bottom nav
-    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-    render_bottom_nav(get_active_page())
+def render_settings_page():
+    st.markdown("### Settings")
+    st.info("Configure API keys and secrets in Streamlit app secrets for safety.")
+
+# App shell
+def render_main_layout(page, st_state, ASSETS, current_asset, connection_label, equity, profit, start_multi, stop_multi, persist_and_reset):
+    # Sidebar
+    render_sidebar_ui(ASSETS, st_state, start_multi, stop_multi, persist_and_reset)
+
+    # Main content
+    if page == "dashboard":
+        render_dashboard_page(st_state, ASSETS, connection_label, equity, profit)
+    else:
+        # asset detail pages use page to select a key
+        if page in st_state.multi_state:
+            render_asset_detail_page(st_state, page)
+        elif page == "settings":
+            render_settings_page()
+        else:
+            render_dashboard_page(st_state, ASSETS, connection_label, equity, profit)
+
+    # Small footer nav (desktop)
+    st.markdown("<div style='height:60px'></div>", unsafe_allow_html=True)
