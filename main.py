@@ -1,8 +1,6 @@
 import streamlit as st
 import time
-from streamlit_autorefresh import st_autorefresh
-
-from ui import render_app_shell, set_mobile_theme, get_active_page
+from ui import render_app_shell, set_mobile_theme, get_active_page, set_active_page
 from bot_core import (
     init_session_state,
     start_bot,
@@ -12,55 +10,32 @@ from bot_core import (
     get_connection_status,
     reset_state,
     get_asset_config_and_current_asset,
-    POLL_INTERVAL
+    POLL_INTERVAL,
 )
 
-# ------------------------------------------------------
 # APP CONFIG
-# ------------------------------------------------------
 st.set_page_config(page_title="Algo Trader", layout="wide")
 
-# ------------------------------------------------------
-# INITIALIZE SESSION STATE
-# ------------------------------------------------------
+# INIT session state
 init_session_state(st.session_state)
-
 state = st.session_state.state
 config = st.session_state.config
 
-# ------------------------------------------------------
-# APPLY THEME + MOBILE ADAPTATION
-# ------------------------------------------------------
+# THEME
 set_mobile_theme()
 
-# ------------------------------------------------------
-# ROUTER — bottom navigation decides which page is active
-# ------------------------------------------------------
+# ROUTING / NAV
 page = get_active_page()
 
-# ------------------------------------------------------
-# BACKGROUND ENGINE — apply queue updates 
-# ------------------------------------------------------
+# PROCESS QUEUE (run once per rerun)
 process_price_updates(st.session_state)
 
-# ------------------------------------------------------
-# CONNECTION STATUS
-# ------------------------------------------------------
+# CONNECTION + METRICS
 connection_label = get_connection_status(st.session_state)
-
-# ------------------------------------------------------
-# EQUITY & PROFIT
-# ------------------------------------------------------
 equity, profit = get_equity_and_profit(st.session_state)
-
-# ------------------------------------------------------
-# ASSET CONFIG / CURRENT ASSET
-# ------------------------------------------------------
 ASSETS, current_asset = get_asset_config_and_current_asset(st.session_state)
 
-# ------------------------------------------------------
-# WRAPPED BOT CONTROLS (pass session_state implicitly)
-# ------------------------------------------------------
+# WRAPPERS
 def start_bot_wrapper():
     start_bot(st.session_state)
 
@@ -70,9 +45,7 @@ def stop_bot_wrapper():
 def reset_state_wrapper():
     reset_state(st.session_state)
 
-# ------------------------------------------------------
-# UI RENDERING
-# ------------------------------------------------------
+# UI render (ui handles navigation via st.session_state)
 render_app_shell(
     page=page,
     state=state,
@@ -85,10 +58,9 @@ render_app_shell(
     start_bot=start_bot_wrapper,
     stop_bot=stop_bot_wrapper,
     reset_state=reset_state_wrapper,
-    poll_interval=POLL_INTERVAL
+    poll_interval=POLL_INTERVAL,
 )
 
-# ------------------------------------------------------
-# AUTO-REFRESH SAFELY (every 2 seconds)
-# ------------------------------------------------------
-st_autorefresh(interval=2000, key="refresh")
+# SAFE AUTO-REFRESH (native)
+# Changing a query param triggers a rerun without external libs.
+st.experimental_set_query_params(ts=int(time.time()))
