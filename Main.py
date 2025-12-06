@@ -1,4 +1,4 @@
-# Main.py (ready to paste)
+# Main.py
 import time
 import streamlit as st
 from ui import render_app_shell, set_mobile_theme, get_active_page
