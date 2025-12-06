@@ -1,67 +1,103 @@
-# main.py
-import streamlit as st
+# Main.py (ready to paste)
 import time
+import streamlit as st
+from ui import render_app_shell, set_mobile_theme, get_active_page
 from bot_core import (
     init_session_state,
-    start_multi,
-    stop_multi,
+    start_bot,
+    stop_bot,
     process_price_updates,
-    get_multi_state,
+    get_equity_and_profit,
+    get_connection_status,
+    reset_state,
     get_asset_config_and_current_asset,
-    persist_all,
-    POLL_INTERVAL,
+    POLL_INTERVAL
 )
-from ui import set_mobile_theme, get_active_page, render_main_layout
 
-st.set_page_config(page_title="Algo Trader — Pro", layout="wide")
+# ------------------------------------------------------
+# APP CONFIG
+# ------------------------------------------------------
+st.set_page_config(page_title="Algo Trader", layout="wide", initial_sidebar_state="collapsed")
 
-# Initialize
+# ------------------------------------------------------
+# INITIALIZE SESSION STATE (explicit)
+# ------------------------------------------------------
+# Pass streamlit's session_state to the initializer
 init_session_state(st.session_state)
+
+state = st.session_state.state
+config = st.session_state.config
+
+# ------------------------------------------------------
+# APPLY THEME + MOBILE ADAPTATION
+# ------------------------------------------------------
 set_mobile_theme()
 
-# Allow page selection via session state or query param 'asset'
+# ------------------------------------------------------
+# ROUTER — bottom navigation decides which page is active
+# ------------------------------------------------------
 page = get_active_page()
-qp = st.experimental_get_query_params()
-if page == "dashboard" and qp.get("asset"):
-    page = qp.get("asset")[0]
 
-# Process incoming queue
+# ------------------------------------------------------
+# BACKGROUND ENGINE — price queue processor
+# ------------------------------------------------------
+# We process any queued price updates (safe to call every run)
 process_price_updates(st.session_state)
 
-# Compute aggregated metrics
-multi = get_multi_state(st.session_state)
-total_equity = 0.0
-for k, s in multi.items():
-    total_equity += s.get("balance", 0.0) + s.get("shares", 0.0) * s.get("current_price", 0.0)
-total_profit = total_equity - (len(multi) * 10000.0)
-
+# ------------------------------------------------------
+# CONNECTION STATUS & METRICS (read-only helpers)
+# ------------------------------------------------------
+connection_label = get_connection_status(st.session_state)
+equity, profit = get_equity_and_profit(st.session_state)
 ASSETS, current_asset = get_asset_config_and_current_asset(st.session_state)
 
-# Wrappers to pass session_state implicitly
-def start_multi_wrapper(st_state_obj, keys):
-    # start only valid keys
-    valid_keys = [k for k in keys if k in ASSETS]
-    start_multi(st.session_state, valid_keys)
+# ------------------------------------------------------
+# WRAPPED BOT CONTROLS FOR UI (these call into bot_core with session_state)
+# ------------------------------------------------------
+def start_bot_wrapper():
+    start_bot(st.session_state)
 
-def stop_multi_wrapper(st_state_obj=None):
-    stop_multi(st.session_state)
+def stop_bot_wrapper():
+    stop_bot(st.session_state)
 
-def persist_and_reset_wrapper(st_state_obj=None):
-    persist_all(st.session_state)
+def reset_state_wrapper():
+    reset_state(st.session_state)
 
-# Render UI
-render_main_layout(
+# ------------------------------------------------------
+# UI RENDERING
+# ------------------------------------------------------
+# This call expects the ui.render_app_shell signature used in your repo.
+render_app_shell(
     page=page,
-    st_state=st.session_state,
+    state=state,
+    config=config,
     ASSETS=ASSETS,
     current_asset=current_asset,
-    connection_label="multi",
-    equity=total_equity,
-    profit=total_profit,
-    start_multi=lambda st_state_obj, keys=st.session_state.strategy.get("multi_assets", []): start_multi_wrapper(st_state_obj, keys),
-    stop_multi=lambda st_state_obj=None: stop_multi_wrapper(st_state_obj),
-    persist_and_reset=lambda st_state_obj=None: persist_and_reset_wrapper(st_state_obj),
+    connection_label=connection_label,
+    equity=equity,
+    profit=profit,
+    start_bot=start_bot_wrapper,
+    stop_bot=stop_bot_wrapper,
+    reset_state=reset_state_wrapper,
+    poll_interval=POLL_INTERVAL
 )
 
-# Safe auto-refresh: update a query param to trigger Streamlit rerun without calling query_params()
-st.experimental_set_query_params(_ts=int(time.time()))
+# ------------------------------------------------------
+# SAFE AUTO-REFRESH (no query params, compatible across Streamlit versions)
+# We store a timestamp in session_state and only call rerun after poll interval
+# ------------------------------------------------------
+if "last_refresh" not in st.session_state:
+    st.session_state.last_refresh = time.time()
+
+# Convert POLL_INTERVAL to a float/sane fallback
+try:
+    _poll = float(POLL_INTERVAL)
+except Exception:
+    _poll = 5.0
+
+now = time.time()
+if now - st.session_state.last_refresh >= _poll:
+    # update timestamp first to avoid immediate rerun loops
+    st.session_state.last_refresh = now
+    # trigger a safe rerun to pick up new data and UI changes
+    st.experimental_rerun()
