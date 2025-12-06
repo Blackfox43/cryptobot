@@ -37,3 +37,4 @@ Lightweight
 Works on Streamlit Cloud
 
 Cross-device
+https://cryptobotfox.streamlit.app/
