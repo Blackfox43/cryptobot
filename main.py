@@ -63,4 +63,4 @@ render_app_shell(
 
 # SAFE AUTO-REFRESH (native)
 # Changing a query param triggers a rerun without external libs.
-st.experimental_set_query_params(ts=int(time.time()))
+st.query_params(ts=int(time.time()))
