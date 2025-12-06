@@ -11,51 +11,45 @@ from bot_core import (
     persist_all,
     POLL_INTERVAL,
 )
-from ui import set_mobile_theme, get_active_page, set_active_page, render_main_layout
+from ui import set_mobile_theme, get_active_page, render_main_layout
 
 st.set_page_config(page_title="Algo Trader — Pro", layout="wide")
 
-# init
+# Initialize
 init_session_state(st.session_state)
-st_state = st
 set_mobile_theme()
 
-# choose page: either 'dashboard' or asset key or 'settings'
+# Allow page selection via session state or query param 'asset'
 page = get_active_page()
-# allow hash-based quick navigation for asset detail
-if page == "dashboard" and st.experimental_get_query_params().get("asset"):
-    page = st.experimental_get_query_params().get("asset")[0]
+qp = st.experimental_get_query_params()
+if page == "dashboard" and qp.get("asset"):
+    page = qp.get("asset")[0]
 
-# process incoming price updates
+# Process incoming queue
 process_price_updates(st.session_state)
 
-# metrics
+# Compute aggregated metrics
 multi = get_multi_state(st.session_state)
-# compute aggregated equity & profit
 total_equity = 0.0
 for k, s in multi.items():
-    total_equity += s.get("balance",0.0) + s.get("shares",0.0) * s.get("current_price",0.0)
-total_profit = total_equity - (len(multi) * 10000.0)  # rough baseline
+    total_equity += s.get("balance", 0.0) + s.get("shares", 0.0) * s.get("current_price", 0.0)
+total_profit = total_equity - (len(multi) * 10000.0)
 
 ASSETS, current_asset = get_asset_config_and_current_asset(st.session_state)
 
-# wrappers
+# Wrappers to pass session_state implicitly
 def start_multi_wrapper(st_state_obj, keys):
-    start_multi(st_state_obj, keys)
+    # start only valid keys
+    valid_keys = [k for k in keys if k in ASSETS]
+    start_multi(st.session_state, valid_keys)
 
-def stop_multi_wrapper(st_state_obj):
-    stop_multi(st_state_obj)
+def stop_multi_wrapper(st_state_obj=None):
+    stop_multi(st.session_state)
 
-def persist_and_reset(st_state_obj):
-    # persist balances and reset prices only
-    persist_all(st_state_obj)
-    # reset price history in session only
-    for k in st_state_obj.multi_state:
-        st_state_obj.multi_state[k]["prices"] = []
-        st_state_obj.multi_state[k]["times"] = []
-        st_state_obj.multi_state[k]["sma"] = []
+def persist_and_reset_wrapper(st_state_obj=None):
+    persist_all(st.session_state)
 
-# render UI
+# Render UI
 render_main_layout(
     page=page,
     st_state=st.session_state,
@@ -64,10 +58,10 @@ render_main_layout(
     connection_label="multi",
     equity=total_equity,
     profit=total_profit,
-    start_multi=lambda s, keys=st.session_state.strategy.get("multi_assets", []): start_multi(st.session_state, keys),
-    stop_multi=lambda s=None: stop_multi(st.session_state),
-    persist_and_reset=lambda s=st.session_state: persist_all(st.session_state),
+    start_multi=lambda st_state_obj, keys=st.session_state.strategy.get("multi_assets", []): start_multi_wrapper(st_state_obj, keys),
+    stop_multi=lambda st_state_obj=None: stop_multi_wrapper(st_state_obj),
+    persist_and_reset=lambda st_state_obj=None: persist_and_reset_wrapper(st_state_obj),
 )
 
-# SAFE AUTO-REFRESH (Python 3.11 compatible)
-st.query_params["_ts"] = int(time.time())
+# Safe auto-refresh: update a query param to trigger Streamlit rerun without calling query_params()
+st.experimental_set_query_params(_ts=int(time.time()))
