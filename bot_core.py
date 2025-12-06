@@ -1,8 +1,9 @@
 # bot_core.py
 """
-Enhanced core: multi-asset pollers, SMA crossover, RSI, MACD, Telegram alerts,
-paper trading engine per-asset, persistence.
-Designed for Python 3.11 + Streamlit 1.36.
+Multi-asset core logic for CryptoBot.
+Provides: init_session_state, poller threads, start/stop for multi assets,
+process_price_updates, indicators (SMA, RSI, MACD), persistence.
+Designed for Python 3.11 and Streamlit 1.36.
 """
 
 import os
@@ -28,13 +29,14 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
-# ---------- Assets ----------
+# ---------- Asset registry ----------
 class Asset:
     def __init__(self, key, name, bybit_symbol, cg_id=None):
         self.key = key
         self.name = name
         self.bybit_symbol = bybit_symbol
         self.cg_id = cg_id
+
 
 ASSETS = {
     "btcusdt": Asset("btcusdt", "Bitcoin", "BTCUSDT", cg_id="bitcoin"),
@@ -62,6 +64,7 @@ def load_state():
     except Exception:
         return {}
 
+
 def save_state(all_state):
     try:
         with open(STATE_FILE, "w") as f:
@@ -88,6 +91,7 @@ def fetch_price_bybit(asset: Asset):
         pass
     return None
 
+
 def fetch_price_coingecko(asset: Asset):
     if not asset.cg_id:
         return None
@@ -100,6 +104,7 @@ def fetch_price_coingecko(asset: Asset):
         return float(p) if p is not None else None
     except Exception:
         return None
+
 
 def fetch_price_with_fallback(asset: Asset):
     p = fetch_price_bybit(asset)
@@ -117,6 +122,7 @@ def sma(values, period):
         return None
     return float(np.mean(values[-period:]))
 
+
 def rsi(values, period=14):
     if len(values) < period + 1:
         return None
@@ -125,16 +131,16 @@ def rsi(values, period=14):
     downs = deltas.copy()
     ups[ups < 0] = 0
     downs[downs > 0] = 0
-    # first average
-    roll_up = np.mean(ups[-period:])
-    roll_down = -np.mean(downs[-period:])
-    if roll_down == 0:
+    avg_gain = np.mean(ups[-period:]) if len(ups[-period:]) > 0 else 0.0
+    avg_loss = -np.mean(downs[-period:]) if len(downs[-period:]) > 0 else 0.0
+    if avg_loss == 0:
         return 100.0
-    rs = roll_up / roll_down
+    rs = avg_gain / avg_loss
     return 100.0 - (100.0 / (1.0 + rs))
 
+
 def macd(values, fast=12, slow=26, signal=9):
-    # simple EMA based MACD (approx using pandas would be nicer, but avoid heavy deps during op)
+    # Use pandas EMA for accurate MACD
     import pandas as pd
     s = pd.Series(values)
     if len(s) < slow + signal:
@@ -148,22 +154,19 @@ def macd(values, fast=12, slow=26, signal=9):
 
 
 # ---------- telegram ----------
-def send_telegram(text):
+def send_telegram(text: str) -> bool:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return False
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text})
+        resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=6)
         return resp.status_code == 200
     except Exception:
         return False
 
 
 # ---------- multi-asset engine ----------
-# session-level structures are stored inside Streamlit session_state,
-# but we also persist trades/balances per-asset in STATE_FILE.
-
-def make_default_asset_state(asset_key, asset_name):
+def make_default_asset_state(asset_key: str, asset_name: str):
     return {
         "prices": [],
         "times": [],
@@ -179,7 +182,7 @@ def make_default_asset_state(asset_key, asset_name):
         "symbol_name": asset_name,
     }
 
-# Poller thread for a single asset
+
 def poller(asset_key, asset_obj, q, stop_event, poll_interval=POLL_INTERVAL):
     fail_count = 0
     while not stop_event.is_set():
@@ -206,17 +209,14 @@ def poller(asset_key, asset_obj, q, stop_event, poll_interval=POLL_INTERVAL):
             slept += step
 
 
-# ---------- session helpers (to be called from main) ----------
+# ---------- session helpers ----------
 def init_session_state(st_session_state):
-    # multi_state: mapping asset_key -> asset_state
     if "multi_state" not in st_session_state:
-        # load persisted
         persisted = load_state()
         multi = {}
         for key, asset in ASSETS.items():
             if key in persisted:
                 base = persisted[key]
-                # ensure keys exist
                 s = make_default_asset_state(key, asset.name)
                 s.update(base)
             else:
@@ -225,45 +225,38 @@ def init_session_state(st_session_state):
         st_session_state.multi_state = multi
 
     if "poll_threads" not in st_session_state:
-        st_session_state.poll_threads = {}  # asset_key -> thread
+        st_session_state.poll_threads = {}
     if "stop_events" not in st_session_state:
-        st_session_state.stop_events = {}  # asset_key -> Event
+        st_session_state.stop_events = {}
     if "price_queue" not in st_session_state:
         st_session_state.price_queue = queue.Queue()
     if "strategy" not in st_session_state:
-        # default strategy parameters (can be changed from UI)
         st_session_state.strategy = {
-            "mode": "sma_dip",  # options: sma_dip, sma_crossover, rsi, macd, combo
+            "mode": "sma_dip",
             "SMA_PERIOD": 20,
             "BUY_DIP": 0.005,
             "TP": 0.01,
             "SL": 0.02,
             "INVEST_PCT": 0.9,
-            # SMA crossover params
             "SMA_SHORT": 5,
             "SMA_LONG": 20,
-            # RSI params
             "RSI_PERIOD": 14,
             "RSI_BUY": 30,
             "RSI_SELL": 70,
-            # MACD params
             "MACD_FAST": 12,
             "MACD_SLOW": 26,
             "MACD_SIGNAL": 9,
-            # misc
-            "multi_assets": [],  # list of asset keys when multi mode selected
+            "multi_assets": [],
             "telegram_alerts": False,
         }
-
     if "lock" not in st_session_state:
         st_session_state.lock = threading.Lock()
 
+
 def persist_all(st_session_state):
-    """Persist balances/trades per-asset to disk (for quick recovery)."""
     try:
         out = {}
         for k, s in st_session_state.multi_state.items():
-            # keep only necessary fields
             out[k] = {
                 "balance": s.get("balance", INITIAL_BALANCE),
                 "shares": s.get("shares", 0.0),
@@ -277,7 +270,6 @@ def persist_all(st_session_state):
         print("[persist_all]", e)
 
 
-# --- start monitoring one or many assets ---
 def start_asset_poll(st_session_state, asset_key):
     if asset_key in st_session_state.poll_threads and st_session_state.poll_threads[asset_key] is not None:
         return
@@ -287,9 +279,9 @@ def start_asset_poll(st_session_state, asset_key):
     t = threading.Thread(target=poller, args=(asset_key, asset, st_session_state.price_queue, stop_ev), daemon=True)
     t.start()
     st_session_state.poll_threads[asset_key] = t
-    # mark active flag in multi_state only when trading started
     st_session_state.multi_state[asset_key]["active"] = True
     print("[poller] started", asset_key)
+
 
 def stop_asset_poll(st_session_state, asset_key):
     ev = st_session_state.stop_events.get(asset_key)
@@ -308,25 +300,23 @@ def stop_asset_poll(st_session_state, asset_key):
 
 
 def start_multi(st_session_state, asset_keys):
-    # start pollers for each requested asset
     for k in asset_keys:
-        start_asset_poll(st_session_state, k)
+        if k in ASSETS:
+            start_asset_poll(st_session_state, k)
+
 
 def stop_multi(st_session_state, asset_keys=None):
-    # stop either specified or all
     keys = asset_keys if asset_keys is not None else list(st_session_state.poll_threads.keys())
     for k in keys:
         if k in st_session_state.poll_threads and st_session_state.poll_threads[k] is not None:
             stop_asset_poll(st_session_state, k)
 
 
-# ---------- strategy & trading logic ----------
+# ---------- strategy & trading ----------
 def process_price_updates(st_session_state):
-    """Consume queue and update per-asset state, run indicators and trade decisions."""
     q = st_session_state.price_queue
     strat = st_session_state.strategy
     multi = st_session_state.multi_state
-    lock = st_session_state.lock
 
     updated = False
     while not q.empty():
@@ -339,7 +329,6 @@ def process_price_updates(st_session_state):
             continue
 
         s = multi[asset_key]
-        # convert to HH:MM:SS for UI
         try:
             dt = datetime.fromisoformat(ts_iso)
             display_ts = dt.astimezone(timezone.utc).strftime("%H:%M:%S")
@@ -356,71 +345,60 @@ def process_price_updates(st_session_state):
             if s["sma"]:
                 s["sma"].pop(0)
 
-        # compute indicators
-        # SMA (generic)
+        # indicators
         sma_val = sma(s["prices"], strat["SMA_PERIOD"]) if len(s["prices"]) >= strat["SMA_PERIOD"] else None
         s["sma"].append(sma_val)
-
-        # SMA crossover (short/long)
         sma_short = sma(s["prices"], strat["SMA_SHORT"]) if len(s["prices"]) >= strat["SMA_SHORT"] else None
         sma_long = sma(s["prices"], strat["SMA_LONG"]) if len(s["prices"]) >= strat["SMA_LONG"] else None
-
-        # RSI
         rsi_val = rsi(s["prices"], strat["RSI_PERIOD"]) if len(s["prices"]) >= (strat["RSI_PERIOD"] + 1) else None
-
-        # MACD
         macd_line, macd_signal, macd_hist = macd(s["prices"], strat["MACD_FAST"], strat["MACD_SLOW"], strat["MACD_SIGNAL"]) if len(s["prices"]) >= (strat["MACD_SLOW"] + strat["MACD_SIGNAL"]) else (None, None, None)
 
-        # Decide signals according to selected strategy or combo
         buy_signal = False
         sell_signal = False
-        signal_reasons = []
-
+        reasons = []
         mode = strat.get("mode", "sma_dip")
 
+        # sma_dip
         if mode == "sma_dip":
-            # old behavior: buy when price < sma * (1 - BUY_DIP)
             if s.get("sma") and s["sma"][-1] is not None and s.get("shares", 0) == 0:
                 if price < s["sma"][-1] * (1 - strat["BUY_DIP"]):
                     buy_signal = True
-                    signal_reasons.append("SMA dip")
+                    reasons.append("SMA dip")
             if s.get("shares", 0) > 0:
                 pct = (price - s.get("avg_entry", 0)) / max(s.get("avg_entry", 1e-9), 1e-9)
                 if pct >= strat["TP"]:
                     sell_signal = True
-                    signal_reasons.append("Take Profit")
+                    reasons.append("Take Profit")
                 elif pct <= -strat["SL"]:
                     sell_signal = True
-                    signal_reasons.append("Stop Loss")
+                    reasons.append("Stop Loss")
 
+        # sma_crossover
         if mode == "sma_crossover":
-            # detect cross: previous values needed
             if sma_short is not None and sma_long is not None:
-                # check previous points if available
                 prev_short = sma(s["prices"][:-1], strat["SMA_SHORT"]) if len(s["prices"]) - 1 >= strat["SMA_SHORT"] else None
                 prev_long = sma(s["prices"][:-1], strat["SMA_LONG"]) if len(s["prices"]) - 1 >= strat["SMA_LONG"] else None
                 if prev_short is not None and prev_long is not None:
-                    # upward cross
                     if prev_short <= prev_long and sma_short > sma_long and s.get("shares", 0) == 0:
                         buy_signal = True
-                        signal_reasons.append("SMA crossover (golden)")
-                    # downward cross
+                        reasons.append("SMA golden cross")
                     if prev_short >= prev_long and sma_short < sma_long and s.get("shares", 0) > 0:
                         sell_signal = True
-                        signal_reasons.append("SMA crossover (death)")
+                        reasons.append("SMA death cross")
 
+        # rsi
         if mode == "rsi":
             if rsi_val is not None:
                 if rsi_val < strat["RSI_BUY"] and s.get("shares", 0) == 0:
                     buy_signal = True
-                    signal_reasons.append(f"RSI {rsi_val:.1f} < {strat['RSI_BUY']}")
+                    reasons.append(f"RSI {rsi_val:.1f} < {strat['RSI_BUY']}")
                 if rsi_val > strat["RSI_SELL"] and s.get("shares", 0) > 0:
                     sell_signal = True
-                    signal_reasons.append(f"RSI {rsi_val:.1f} > {strat['RSI_SELL']}")
+                    reasons.append(f"RSI {rsi_val:.1f} > {strat['RSI_SELL']}")
 
+        # macd
         if mode == "macd":
             if macd_line is not None and macd_signal is not None:
-                # detect cross using last two values via recompute
                 import pandas as pd
                 s_series = pd.Series(s["prices"])
                 ema_fast = s_series.ewm(span=strat["MACD_FAST"], adjust=False).mean()
@@ -434,67 +412,54 @@ def process_price_updates(st_session_state):
                     cur_sig = sig_full.iloc[-1]
                     if prev_macd <= prev_sig and cur_macd > cur_sig and s.get("shares", 0) == 0:
                         buy_signal = True
-                        signal_reasons.append("MACD cross up")
+                        reasons.append("MACD cross up")
                     if prev_macd >= prev_sig and cur_macd < cur_sig and s.get("shares", 0) > 0:
                         sell_signal = True
-                        signal_reasons.append("MACD cross down")
+                        reasons.append("MACD cross down")
 
+        # combo
         if mode == "combo":
-            # if any indicator gives a buy -> buy; sell if any sell
-            if s.get("sma") and s["sma"][-1] is not None and s.get("shares",0) == 0:
+            if s.get("sma") and s["sma"][-1] is not None and s.get("shares", 0) == 0:
                 if price < s["sma"][-1] * (1 - strat["BUY_DIP"]):
                     buy_signal = True
-                    signal_reasons.append("SMA dip")
-            if rsi_val is not None and s.get("shares",0) == 0 and rsi_val < strat["RSI_BUY"]:
+                    reasons.append("SMA dip")
+            if rsi_val is not None and s.get("shares", 0) == 0 and rsi_val < strat["RSI_BUY"]:
                 buy_signal = True
-                signal_reasons.append("RSI")
-            if macd_line is not None and macd_signal is not None and s.get("shares",0) == 0:
-                # simple macd check last>signal
-                if macd_line > macd_signal:
-                    buy_signal = True
-                    signal_reasons.append("MACD")
-            # sells: TP/SL or indicators
-            if s.get("shares",0) > 0:
-                pct = (price - s.get("avg_entry",0)) / max(s.get("avg_entry",1e-9),1e-9)
+                reasons.append("RSI")
+            if macd_line is not None and macd_signal is not None and s.get("shares", 0) == 0 and macd_line > macd_signal:
+                buy_signal = True
+                reasons.append("MACD")
+            if s.get("shares", 0) > 0:
+                pct = (price - s.get("avg_entry", 0)) / max(s.get("avg_entry", 1e-9), 1e-9)
                 if pct >= strat["TP"] or pct <= -strat["SL"]:
                     sell_signal = True
-                    signal_reasons.append("TP/SL")
+                    reasons.append("TP/SL")
 
-        # execute paper trades if signals true
+        # execute paper trades
         if buy_signal:
-            # buy with INVEST_PCT of balance
             invest = s.get("balance", INITIAL_BALANCE) * strat["INVEST_PCT"]
             if invest > 0:
                 s["shares"] = invest / price
                 s["balance"] = s.get("balance", INITIAL_BALANCE) - invest
                 s["avg_entry"] = price
-                s["trades"].insert(0, {"time": display_ts, "type": "BUY", "price": price, "amount": s["shares"], "pnl": 0, "reason": ", ".join(signal_reasons)})
+                s["trades"].insert(0, {"time": display_ts, "type": "BUY", "price": price, "amount": s["shares"], "pnl": 0, "reason": ", ".join(reasons)})
                 persist_all(st_session_state)
                 updated = True
                 if strat.get("telegram_alerts"):
-                    send_telegram(f"[TRADE BUY] {s['symbol_name']} {s['shares']:.6f} @ ${price:.4f} | reason: {', '.join(signal_reasons)}")
+                    send_telegram(f"[TRADE BUY] {s['symbol_name']} {s['shares']:.6f} @ ${price:.4f} | reason: {', '.join(reasons)}")
 
         if sell_signal and s.get("shares", 0) > 0:
             revenue = s["shares"] * price
             pnl = revenue - (s["shares"] * s.get("avg_entry", 0.0))
             s["balance"] = s.get("balance", INITIAL_BALANCE) + revenue
-            s["trades"].insert(0, {"time": display_ts, "type": "SELL", "price": price, "amount": s["shares"], "pnl": pnl, "reason": ", ".join(signal_reasons)})
+            s["trades"].insert(0, {"time": display_ts, "type": "SELL", "price": price, "amount": s["shares"], "pnl": pnl, "reason": ", ".join(reasons)})
             s["shares"] = 0.0
             s["avg_entry"] = 0.0
             persist_all(st_session_state)
             updated = True
             if strat.get("telegram_alerts"):
-                send_telegram(f"[TRADE SELL] {s['symbol_name']} PNL ${pnl:.2f} @ ${price:.4f} | reason: {', '.join(signal_reasons)}")
+                send_telegram(f"[TRADE SELL] {s['symbol_name']} PNL ${pnl:.2f} @ ${price:.4f} | reason: {', '.join(reasons)}")
 
-        # alerts for signals (without trade) if enabled
-        if strat.get("telegram_alerts") and not (buy_signal or sell_signal) and len(signal_reasons) > 0:
-            # send occasional signal alert (rate-limited by not spamming: only if last trade older than X or every N)
-            # Simple gating: only send alert if last trade time not equal display_ts
-            last_trade_time = s["trades"][0]["time"] if s["trades"] else None
-            if last_trade_time != display_ts:
-                send_telegram(f"[SIGNAL] {s['symbol_name']} price ${price:.4f} signals: {', '.join(signal_reasons)}")
-
-        # end processing for this tick
     if updated:
         persist_all(st_session_state)
 
@@ -503,6 +468,8 @@ def process_price_updates(st_session_state):
 def get_multi_state(st_session_state):
     return st_session_state.multi_state
 
+
 def get_asset_config_and_current_asset(st_session_state, key=None):
-    k = key if key else st_session_state.multi_state and list(st_session_state.multi_state.keys())[0]
-    return ASSETS, ASSETS.get(k, list(ASSETS.values())[0])
+    # Returns (ASSETS, current_asset)
+    k = key if key else (st_session_state.strategy.get("multi_assets") or ["btcusdt"])[0]
+    return ASSETS, ASSETS.get(k, ASSETS["btcusdt"])
